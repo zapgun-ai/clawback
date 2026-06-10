@@ -1,0 +1,3 @@
+Reply with exactly: ok
+What is 2+2? Answer with only the number.
+Reply with exactly: done

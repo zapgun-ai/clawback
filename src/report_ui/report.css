@@ -1,0 +1,278 @@
+/* Report viewer styling. Pulls design tokens (--fg/--muted/--border/--card/
+ * --accent/--warn/--ok) from the dashboard's style.css, loaded first, so the
+ * two surfaces stay visually consistent and dark-mode just works. The dashboard
+ * sheet also owns header/.status-bar/.card layout and the <600px mobile
+ * breakpoint, so this file only styles the report's own pieces: the clickable
+ * share-card image and the context caption beneath it. One story, fits on a
+ * phone. */
+
+.report-subtitle {
+	color: var(--muted);
+	font-size: 13px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
+.report-run-picker {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.report-run-picker select {
+	font-family: inherit;
+	font-size: 13px;
+	padding: 3px 6px;
+	background: var(--card);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	/* Cap so a long run id never blows out a narrow header; the option text
+	 * truncates rather than forcing a horizontal scroll on mobile. */
+	max-width: min(48ch, 60vw);
+}
+
+.report-empty {
+	max-width: 70ch;
+	margin: 40px auto;
+	padding: 24px;
+	text-align: center;
+	color: var(--muted);
+}
+
+.report-empty-hint {
+	font-size: 13px;
+}
+
+.report-empty-hint code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.92em;
+	background: color-mix(in srgb, var(--border) 35%, transparent);
+	padding: 1px 4px;
+	border-radius: 3px;
+	word-break: break-word;
+}
+
+/* ---- the card panel: the full-bleed share-card image ---- */
+
+/* The panel holds a single full-bleed piece — the card image, which now bakes
+ * its own context (callout + graph) — so it bleeds to the rounded corners with
+ * no inner padding and there's no separate caption to lay out. */
+.report-panel {
+	padding: 0;
+	overflow: hidden;
+}
+
+/* The card image is a button (clicking it downloads the PNG), so the whole
+ * image is the hit target. Strip native button chrome (border/background/inset
+ * padding/appearance) so it reads as a bare full-bleed image; the focus ring is
+ * the only decoration, drawn INSIDE the clipped panel (negative offset) so it
+ * isn't cropped by overflow:hidden. */
+.report-card-link {
+	display: block;
+	width: 100%;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	-webkit-appearance: none;
+	appearance: none;
+	cursor: pointer;
+}
+
+.report-card-link:focus-visible {
+	outline: 3px solid var(--accent);
+	outline-offset: -3px;
+}
+
+/* Full-bleed: the card fills the panel edge to edge. aspect-ratio reserves the
+ * 1200×630 box before the data: URL decodes, so the panel doesn't jump on load;
+ * the dark fill matches the card so the reserved box isn't a flash. */
+.report-card-img {
+	display: block;
+	width: 100%;
+	height: auto;
+	aspect-ratio: 1200 / 630;
+	background: #0b0f14;
+}
+
+/* ---- share / download (toolbar) ---- */
+
+/* The share / download / CSV controls live in the top toolbar (the header
+ * status bar), grouped so they wrap together with the rest of the bar on a
+ * narrow screen rather than scattering. */
+.report-tools {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+/* The async share/download status line sits just under the toolbar so its
+ * polite live-region announcements have room without reflowing the bar.
+ * role="status" + aria-live announce it to assistive tech; the reserved
+ * min-height keeps it from shifting the layout when a message appears. */
+.report-share-status {
+	margin: 6px 20px 0;
+	min-height: 1.2em;
+	color: var(--muted);
+	font-size: 13px;
+}
+
+/* ---- share-consent chooser (modal) ---- */
+
+/* Full-viewport scrim that centres the dialog. The generic .hidden utility
+ * (display:none !important) hides it; when shown it's a flexbox so the dialog
+ * sits centred. A dark scrim works in both colour schemes (it's always behind a
+ * --card-coloured panel). z-index clears the sticky header. */
+.share-dialog-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 1000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 20px;
+	background: rgba(0, 0, 0, 0.55);
+}
+
+.share-dialog {
+	width: 100%;
+	max-width: 30rem;
+	max-height: calc(100vh - 40px);
+	overflow-y: auto;
+	background: var(--card);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.share-dialog-form {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	padding: 20px;
+}
+
+.share-dialog-title {
+	margin: 0;
+	font-size: 17px;
+	font-weight: 700;
+}
+
+.share-dialog-desc {
+	margin: 0;
+	color: var(--muted);
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+/* Reset the fieldset's native chrome; the tier rows carry the structure. */
+.share-tier-set {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+.share-tier-legend {
+	padding: 0;
+	margin-bottom: 2px;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	color: var(--muted);
+	text-transform: uppercase;
+}
+
+/* Each tier is a full-width clickable row: the native radio plus a name + note.
+ * The whole label is the hit target (native behaviour). */
+.share-tier {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+/* The selected row gets an accent border so the choice reads at a glance —
+ * never the sole signal (the radio itself carries state for AT and no-:has UAs). */
+.share-tier:has(input:checked) {
+	border-color: var(--accent);
+	box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.share-tier input[type="radio"] {
+	margin-top: 2px;
+	flex: none;
+	accent-color: var(--accent);
+}
+
+/* The radio shows the keyboard focus; mirror it onto the whole row so the
+ * focused option is obvious without hunting for the small control. */
+.share-tier:focus-within {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+.share-tier-body {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.share-tier-name {
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.share-tier-note {
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--muted);
+}
+
+.share-handle-row {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.share-handle-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--muted);
+}
+
+.share-handle-input {
+	font-family: inherit;
+	font-size: 14px;
+	padding: 6px 8px;
+	background: var(--card);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+}
+
+.share-handle-input:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+
+.share-dialog-fineprint {
+	margin: 0;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--muted);
+}
+
+.share-dialog-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}

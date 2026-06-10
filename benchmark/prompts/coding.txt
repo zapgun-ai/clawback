@@ -1,0 +1,23 @@
+# Prompts for the PTY-driven load generator (benchmark/bin/drive_pty.js).
+# One prompt per line. Blank lines and lines starting with '#' are ignored.
+# The driver cycles through these (prompt[i % N]) one per turn. Keep them
+# self-contained and read-only-ish: this exercises clawback's cache mechanics,
+# not your repo. The exact wording does not matter for the cache study — what
+# matters is that each turn sends a stable system+tools prefix (so the
+# ANTHROPIC KEY is reused) with a small varying suffix (the prompt).
+#
+# These deliberately ask for explanation/inspection rather than edits, so a
+# long unattended run does not mutate the working tree.
+
+Summarize what this project does in two sentences.
+List the top-level source files and what each is responsible for.
+What is the difference between the SESSION KEY and the ANTHROPIC KEY here?
+Explain how the config merging precedence works, lowest to highest.
+Which knobs does passthrough mode force off, and where is that enforced?
+Describe the prompt-cache eviction boundaries this proxy tries to defeat.
+What does the keep-alive subsystem do between turns, and why?
+Explain the 1h-TTL cache rewrite and why it matters for Claude Code.
+What does strip-ephemeral do to the system block, and when does it help?
+How does the turn-log capture per-turn usage, and what fields does it record?
+Walk through what happens to a single /v1/messages request as it is proxied.
+What would you check first if cache-read token share suddenly dropped to zero?

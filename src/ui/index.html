@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width,initial-scale=1" />
+		<title>clawback.md</title>
+		<link rel="stylesheet" href="/_proxy/ui/style.css" />
+	</head>
+	<body>
+		<a href="#chartsGrid" class="skip-link">Skip to charts</a>
+
+		<header>
+			<div class="title-block">
+				<h1>clawback.md</h1>
+				<button
+					id="enabledToggle"
+					class="enabled-switch"
+					type="button"
+					aria-pressed="true"
+					data-hotkey="1"
+					title="hotkey: 1 — toggle every clawback.md optimization off (baseline mode) or on"
+				>
+					<span class="enabled-switch-track" aria-hidden="true"><span class="enabled-switch-thumb"></span></span>
+					<span class="enabled-switch-label">enabled</span>
+				</button>
+			</div>
+			<div class="status-bar">
+				<!-- statusText sits at the LEFT of the right-anchored bar so its
+				     variable width ("loading…" → "67 samples · 3 sessions") only
+				     pushes empty space at the bar's left edge — items to its
+				     right (continue button, refresh, help) stay anchored to the
+				     header's right edge regardless of message length. -->
+				<span id="statusDot" class="dot" aria-hidden="true"></span>
+				<span id="statusText" aria-live="polite" aria-atomic="true">connecting…</span>
+				<span id="staleIndicator" class="stale-indicator hidden" aria-live="polite">paused</span>
+				<span id="modeSummary" class="mode-summary" aria-live="polite" aria-atomic="true" title="Number of clawback.md interventions currently active.">…</span>
+				<button
+					id="captureBaselineBtn"
+					class="action-btn capture-baseline-btn"
+					type="button"
+					title="Disable clawback.md's interventions for a few turns to record a fresh baseline, then re-enable them automatically."
+					aria-describedby="captureBaselineHint"
+				>capture baseline</button>
+				<span id="captureBaselineHint" class="visually-hidden">Flips passthrough on for the next few real API turns, capturing a no-intervention baseline, then flips it off.</span>
+				<label
+					class="capture-shadow-toggle"
+					title="Shadow capture keeps clawback.md's optimizations ON while also recording the no-clawback baseline at the same time — by sending every turn to Anthropic twice. It burns tokens about twice as fast for the duration of the capture."
+				>
+					<input type="checkbox" id="captureShadowToggle" aria-describedby="captureShadowWarn" />
+					<span>shadow</span>
+					<span class="capture-shadow-cost" aria-hidden="true">2&times;</span>
+				</label>
+				<span id="captureShadowWarn" class="capture-shadow-warn" role="note" hidden>Shadow capture sends every turn to Anthropic twice — it keeps clawback.md&rsquo;s optimizations on and records the no-clawback baseline at the same time, so it burns your tokens about twice as fast for the duration of the capture.</span>
+				<label class="refresh">
+					<span>refresh</span>
+					<select id="refreshSelect" aria-label="refresh interval">
+						<option value="250" selected>0.25s</option>
+						<option value="500">0.5s</option>
+						<option value="1000">1s</option>
+						<option value="2000">2s</option>
+						<option value="5000">5s</option>
+						<option value="15000">15s</option>
+						<option value="60000">1m</option>
+						<option value="0">off</option>
+					</select>
+				</label>
+				<a id="reportLink" class="action-btn ghost" href="/_proxy/report" title="Open the saved benchmark-run report viewer.">report</a>
+					<button id="helpBtn" class="action-btn ghost help-btn" type="button" title="Show keyboard shortcuts (?)" aria-label="Show keyboard shortcuts">?</button>
+			</div>
+		</header>
+
+		<div
+			id="baselineBanner"
+			class="baseline-banner"
+			role="status"
+			aria-live="polite"
+			data-mode="treatment"
+		>
+			<span class="banner-text banner-text-baseline">
+				<strong>BASELINE MODE</strong> — no optimizations are being applied. We are collecting a baseline to measure clawback.md's optimizations against. Please use your agent as normal. To skip the baseline and apply optimizations now, flip the toggle:
+			</span>
+			<span class="banner-text banner-text-treatment">
+				<strong>CLAWBACK.MD ENABLED</strong> — optimizations are available. To collect a clean baseline for comparison, flip the toggle:
+			</span>
+			<button
+				id="baselineBannerToggle"
+				class="enabled-switch baseline-banner-toggle"
+				type="button"
+				aria-pressed="false"
+				title="toggle every clawback.md optimization off (baseline mode) or on"
+			>
+				<span class="enabled-switch-track" aria-hidden="true"><span class="enabled-switch-thumb"></span></span>
+				<span class="enabled-switch-label">enabled</span>
+			</button>
+		</div>
+
+		<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+
+		<div id="helpOverlay" class="help-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="helpOverlayTitle">
+			<div class="help-overlay-panel">
+				<h2 id="helpOverlayTitle">keyboard shortcuts</h2>
+				<dl class="help-shortcuts">
+					<dt>1</dt><dd>baseline mode (clawback.md master switch)</dd>
+					<dt>2</dt><dd>keep-alive</dd>
+					<dt>3</dt><dd>1h cache ttl</dd>
+					<dt>4</dt><dd>strip-ephemeral</dd>
+					<dt>5</dt><dd>extended cadence</dd>
+					<dt>6</dt><dd>mobile</dd>
+					<dt>7</dt><dd>auto-continue</dd>
+					<dt>?</dt><dd>toggle this help</dd>
+					<dt>esc</dt><dd>close this help</dd>
+				</dl>
+				<button id="helpCloseBtn" class="action-btn" type="button">close</button>
+			</div>
+		</div>
+
+		<main>
+			<section class="suggestions card hidden" id="suggestionsCard" aria-labelledby="suggestionsTitle">
+				<div class="suggestions-header">
+					<h2 class="section-title" id="suggestionsTitle">suggestions</h2>
+					<div class="suggestions-bulk">
+						<button id="suggestionsAcceptAllBtn" class="filter-btn primary" type="button" title="Apply every visible suggestion in one go.">accept all</button>
+						<button id="suggestionsDismissAllBtn" class="filter-btn ghost" type="button" title="Dismiss every visible suggestion in one go.">dismiss all</button>
+						<button id="suggestionsResetBtn" class="filter-btn ghost" type="button" title="Re-show suggestions you've dismissed.">reset dismissed</button>
+					</div>
+				</div>
+				<div id="suggestionsList" class="suggestions-list" aria-live="polite"></div>
+			</section>
+
+			<section class="overview-section card" aria-labelledby="overviewTitle">
+				<div class="overview-header">
+					<h2 class="section-title" id="overviewTitle">overview</h2>
+					<div id="overviewLegend" class="overview-legend"></div>
+				</div>
+				<div class="overview-chart" id="overviewChart"></div>
+			</section>
+
+			<section class="settings card" aria-labelledby="settingsTitle">
+				<div class="settings-header">
+					<h2 class="section-title" id="settingsTitle">optimizations</h2>
+					<button
+						id="clearHistoryBtn"
+						class="action-btn"
+						type="button"
+						aria-describedby="clearHistoryHint"
+					>clear charts</button>
+					<p id="clearHistoryHint" class="action-hint">Wipe the server's metrics ring buffer. Charts start empty after this.</p>
+				</div>
+
+				<div class="settings-group" role="group" aria-labelledby="cacheGroupTitle">
+					<h3 class="settings-group-title" id="cacheGroupTitle">cache</h3>
+					<div class="settings-group-grid">
+						<div class="setting-row">
+							<button
+								id="keepAliveToggle"
+								class="mode-toggle"
+								type="button"
+								aria-pressed="false"
+								aria-describedby="keepAliveHint"
+								data-hotkey="2"
+								title="keep-alive (hotkey: 2) — synthetic pings keep the prompt cache warm"
+							>
+								<span class="mode-toggle-icon" aria-hidden="true">○</span><span class="mode-toggle-text">keep-alive: …</span>
+							</button>
+							<p id="keepAliveHint" class="toggle-hint">Send synthetic pings every 1-4 minutes so Anthropic's prompt cache doesn't expire between turns.</p>
+						</div>
+						<div class="setting-row">
+							<button
+								id="extendCacheTtlToggle"
+								class="mode-toggle"
+								type="button"
+								aria-pressed="false"
+								aria-describedby="extendCacheTtlHint"
+								data-hotkey="3"
+								title="1h cache ttl (hotkey: 3) — use Anthropic's extended cache tier"
+							>
+								<span class="mode-toggle-icon" aria-hidden="true">○</span><span class="mode-toggle-text">1h cache ttl: …</span>
+							</button>
+							<p id="extendCacheTtlHint" class="toggle-hint">Use Anthropic's 1-hour extended cache tier instead of the default 5 minutes.</p>
+						</div>
+						<div class="setting-row">
+							<button
+								id="stripEphemeralToggle"
+								class="mode-toggle"
+								type="button"
+								aria-pressed="false"
+								aria-describedby="stripEphemeralHint"
+								data-hotkey="4"
+								title="strip-ephemeral (hotkey: 4) — normalize dates so the cache survives day boundaries"
+							>
+								<span class="mode-toggle-icon" aria-hidden="true">○</span><span class="mode-toggle-text">strip-ephemeral: …</span>
+							</button>
+							<p id="stripEphemeralHint" class="toggle-hint">Normalize dates and env blocks in the system prompt so the cache survives day boundaries.</p>
+						</div>
+						<div class="setting-row">
+							<button
+								id="keepAliveExtendedToggle"
+								class="mode-toggle"
+								type="button"
+								aria-pressed="false"
+								aria-describedby="keepAliveExtendedHint"
+								data-hotkey="5"
+								title="extended cadence (hotkey: 5) — 15-45 min ping cadence, pairs with the 1h cache tier"
+							>
+								<span class="mode-toggle-icon" aria-hidden="true">○</span><span class="mode-toggle-text">extended cadence: …</span>
+							</button>
+							<p id="keepAliveExtendedHint" class="toggle-hint">Switch to a 15-45 minute ping cadence. Pairs with the 1-hour cache tier to cut ping cost ~6-12×.</p>
+						</div>
+					</div>
+				</div>
+
+				<div class="settings-row-2col">
+					<div class="settings-group" role="group" aria-labelledby="networkGroupTitle">
+						<h3 class="settings-group-title" id="networkGroupTitle">network</h3>
+						<div class="settings-group-grid">
+							<div class="setting-row">
+								<button
+									id="mobileToggle"
+									class="mode-toggle"
+									type="button"
+									aria-pressed="false"
+									aria-describedby="mobileHint"
+									data-hotkey="6"
+									title="mobile (hotkey: 6) — gzip outgoing and force non-streaming"
+								>
+									<span class="mode-toggle-icon" aria-hidden="true">○</span><span class="mode-toggle-text">mobile: …</span>
+								</button>
+								<p id="mobileHint" class="toggle-hint">Compress outgoing requests and convert streaming to single responses. Cuts radio-on time on tethered links.</p>
+							</div>
+						</div>
+					</div>
+
+					<div class="settings-group" role="group" aria-labelledby="opsGroupTitle">
+						<h3 class="settings-group-title" id="opsGroupTitle">ops</h3>
+						<div class="settings-group-grid">
+							<div class="setting-row">
+								<button
+									id="autoContinueToggle"
+									class="mode-toggle"
+									type="button"
+									aria-pressed="false"
+									aria-describedby="autoContinueHint"
+									data-hotkey="7"
+									title="auto-continue (hotkey: 7) — resume claude after a rate-limit cap clears"
+								>
+									<span class="mode-toggle-icon" aria-hidden="true">○</span><span class="mode-toggle-text">auto-continue: …</span>
+								</button>
+								<p id="autoContinueHint" class="toggle-hint">Resume Claude automatically once a rate-limit cap clears. Only fires under <code>clawback claude</code> (PTY mode).</p>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<p id="passthroughDisabledReason" class="visually-hidden">Disabled while passthrough is on.</p>
+			</section>
+
+			<section class="charts-section card" aria-labelledby="chartsTitle">
+				<h2 class="section-title" id="chartsTitle">metrics</h2>
+				<div class="charts-grid" id="chartsGrid"></div>
+			</section>
+
+			<section class="sessions-bar card" id="sessionsBar" aria-labelledby="sessionsTitle">
+				<div class="sessions-controls">
+					<h2 class="section-title" id="sessionsTitle">sessions</h2>
+					<span id="sessionsFocusIndicator" class="sessions-focus-indicator hidden" aria-live="polite">focused</span>
+					<button id="clearFocusBtn" class="filter-btn ghost hidden" type="button" title="Clear the focus and show every session.">clear focus</button>
+					<button id="aggregateToggle" class="filter-btn aggregate" type="button" aria-pressed="true" title="Show or hide the aggregate line on every chart.">aggregate</button>
+					<button id="showAllBtn" class="filter-btn ghost" type="button">all</button>
+					<button id="showNoneBtn" class="filter-btn ghost" type="button">none</button>
+					<div class="sessions-controls-right">
+						<button id="downloadCsvBtn" class="filter-btn ghost" type="button" title="Download the sessions table (label + per-metric averages + idle) as a CSV file.">download csv</button>
+						<button id="purgeEvictedBtn" class="filter-btn ghost danger" type="button" title="Delete every session whose prompt cache has already evicted. Confirms before firing.">delete evicted</button>
+						<button id="purgeAllBtn" class="filter-btn ghost danger" type="button" title="Delete every session from the proxy store. Confirms before firing.">delete all</button>
+					</div>
+				</div>
+				<div class="sessions-table-wrapper">
+					<table class="sessions-table" id="sessionsTable">
+						<thead>
+							<tr>
+								<th scope="col">session</th>
+								<th scope="col" class="metric-col" title="context window % used (latest)">context</th>
+								<th scope="col" class="metric-col" title="5-hour quota % used (latest)">quota</th>
+								<th scope="col" class="metric-col" title="7-day quota % used (latest)">week</th>
+								<th scope="col" class="metric-col" title="cache hit rate (mean)">cache</th>
+								<th scope="col" class="metric-col" title="per-turn cache hit rate (mean)">turn</th>
+								<th scope="col" class="metric-col" title="tokens/sec (mean)">tps</th>
+								<th scope="col" class="metric-col" title="time-to-first-token ms (mean)">ttft</th>
+								<th scope="col" class="metric-col" title="time until Anthropic's prompt cache evicts (counts down from this session's TTL since its last touch)">evict</th>
+								<th scope="col" aria-label="actions"></th>
+							</tr>
+						</thead>
+						<tbody id="sessionsTableBody"></tbody>
+					</table>
+				</div>
+			</section>
+
+		</main>
+
+		<!-- Point the report link at /<adminPathPrefix>/report. The rest of
+		     this page hardcodes /_proxy/, but the prefix is operator-mutable
+		     (--admin-path), so derive it from the path segment before "ui".
+		     Runs before the deferred module below, so the href is correct by
+		     first paint. -->
+		<script>
+			(function () {
+				var parts = location.pathname.split("/").filter(Boolean);
+				var i = parts.lastIndexOf("ui");
+				var prefix = i > 0 ? parts[i - 1] : "_proxy";
+				var a = document.getElementById("reportLink");
+				if (a) a.setAttribute("href", "/" + prefix + "/report");
+			})();
+		</script>
+		<script type="module" src="/_proxy/ui/app.js"></script>
+	</body>
+</html>

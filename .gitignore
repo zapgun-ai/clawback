@@ -1,0 +1,14 @@
+.*
+!.gitignore
+!.gitattributes
+!.skills
+!.AGENTS.md
+
+node_modules/
+coverage/
+
+# Added by `clawback init`
+CLAWBACK.md
+data/
+logs/
+runs/

@@ -1,0 +1,41 @@
+{
+	"name": "@zapgun/clawback",
+	"version": "0.5.0",
+	"description": "Tokenmaxxing for Claude Code.",
+	"type": "module",
+	"publishConfig": {
+		"access": "public"
+	},
+	"main": "./src/index.js",
+	"bin": {
+		"clawback": "./bin/clawback.js"
+	},
+	"scripts": {
+		"start": "node bin/clawback.js",
+		"setup": "npm link && clawback init --global && clawback setup claude --force",
+		"test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+		"lint": "biome lint .",
+		"format": "biome format --write .",
+		"check": "biome check .",
+		"postinstall": "node src/postinstall.js"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.4",
+		"jest": "^29.7.0",
+		"jsdom": "^25.0.1"
+	},
+	"optionalDependencies": {
+		"node-pty": "^1.0.0"
+	},
+	"jest": {
+		"testEnvironment": "node",
+		"testMatch": ["<rootDir>/test/**/*.test.js"],
+		"transform": {}
+	},
+	"engines": {
+		"node": ">=24.0.0"
+	},
+	"files": ["bin", "src", "README.md", "LICENSE"],
+	"keywords": ["claude", "anthropic", "proxy", "prompt-cache", "claude-code"],
+	"license": "SEE LICENSE IN LICENSE"
+}

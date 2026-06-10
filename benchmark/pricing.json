@@ -1,0 +1,17 @@
+{
+	"version": "2026-05-28",
+	"note": "Base $/Mtok per model family. VERIFY against anthropic.com/pricing before publishing any number. The cache multipliers below are fixed by Anthropic's billing model (5m write = 1.25x base input, 1h write = 2x, cache read = 0.1x) and are the load-bearing part of relative savings; base per-model rates are best-effort and only affect absolute dollars.",
+	"multipliers": {
+		"input": 1.0,
+		"cacheWrite5m": 1.25,
+		"cacheWrite1h": 2.0,
+		"cacheRead": 0.1,
+		"output": 1.0
+	},
+	"models": {
+		"claude-opus-4": { "inputPerMtok": 15.0, "outputPerMtok": 75.0 },
+		"claude-sonnet-4": { "inputPerMtok": 3.0, "outputPerMtok": 15.0 },
+		"claude-haiku-4": { "inputPerMtok": 1.0, "outputPerMtok": 5.0 }
+	},
+	"fallback": { "inputPerMtok": 15.0, "outputPerMtok": 75.0 }
+}

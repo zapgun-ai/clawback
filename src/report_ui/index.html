@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width,initial-scale=1" />
+		<title>clawback.md · benchmark report</title>
+		<!-- OpenGraph / X-card STUBS. Static placeholders so a shared link unfurls
+		     with clawback branding today. Per-run values — the headline % and a
+		     rendered og:image — need server-side injection keyed to the run; that
+		     (and the public share host) is the post-MVP "build in public" direction
+		     tracked in PLAN.md. The PNG share card itself is produced client-side by
+		     share_card.js and offered as Download / native share below. -->
+		<meta property="og:title" content="clawback.md" />
+		<meta property="og:description" content="clawback.md controls the Claude Code prompt-cache tier so more of your token quota survives. See how much a run reclaimed." />
+		<meta property="og:type" content="website" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<!-- __BASE__ is replaced by the report server with /<adminPathPrefix>/report
+		     at serve time, so every relative URL below (and in report.js) resolves
+		     under the operator's chosen admin path without hardcoding "/_proxy/". -->
+		<base href="__BASE__/" />
+		<link rel="stylesheet" href="../ui/style.css" />
+		<link rel="stylesheet" href="report.css" />
+	</head>
+	<body>
+		<a href="#chartCard" class="skip-link">Skip to report</a>
+
+		<header>
+			<div class="title-block">
+				<h1>clawback.md</h1>
+				<span class="report-subtitle">benchmark report</span>
+			</div>
+			<div class="status-bar">
+				<!-- Share / download / CSV lead the toolbar as one block, to the LEFT of
+				     the run-picker → refresh → dashboard nav. The headline figure renders
+				     to a 1200×630 PNG client-side: share to the device sheet (image
+				     attached), post as text, or save. -->
+				<div class="report-tools" id="reportTools" role="group" aria-label="share and download">
+					<button id="shareNative" class="action-btn" type="button" title="Open your device's share sheet with the result image attached.">share image…</button>
+					<button id="shareX" class="action-btn ghost" type="button" title="Compose a post on X.">post to X</button>
+					<button id="shareBsky" class="action-btn ghost" type="button" title="Compose a post on Bluesky.">post to Bluesky</button>
+					<button id="shareTelegram" class="action-btn ghost" type="button" title="Share to Telegram.">post to Telegram</button>
+					<button id="shareWhatsapp" class="action-btn ghost" type="button" title="Share to WhatsApp.">post to WhatsApp</button>
+					<button id="shareSettings" class="action-btn ghost" type="button" title="Choose what's shared when you click the card — or withdraw consent. Default is silent: nothing leaves your machine.">sharing…</button>
+					<button id="downloadCard" class="action-btn ghost" type="button" title="Download the result as a 1200×630 PNG share card.">download PNG</button>
+					<a id="csvDownload" class="action-btn ghost" href="#" download>download CSV</a>
+				</div>
+				<label class="report-run-picker">
+					<span>run</span>
+					<select id="runSelect" aria-label="benchmark run"></select>
+				</label>
+				<button id="refreshBtn" class="action-btn ghost" type="button" title="Re-read the runs directory and reload this run.">refresh</button>
+				<a id="dashboardLink" class="action-btn ghost" href="../ui/">← dashboard</a>
+			</div>
+		</header>
+
+		<p class="report-share-status" id="shareStatus" role="status" aria-live="polite"></p>
+
+		<div id="emptyState" class="report-empty hidden" role="status">
+			<p>No completed benchmark runs found in the report directory.</p>
+			<p class="report-empty-hint">Run the analyzer (<code>node benchmark/bin/analyze.js --out runs/&lt;name&gt; …</code>) then plot (<code>node benchmark/bin/plot.js --in runs/&lt;name&gt; --out runs/&lt;name&gt;/charts</code>), then refresh.</p>
+		</div>
+
+		<main id="reportMain" class="hidden">
+			<!-- The share card IS the page: the same 1200×630 image you'd post,
+			     rendered inline as a clickable <img>. Clicking it is the deliberate
+			     opt-in gesture — it opens the sharing chooser (below) the first time,
+			     then acts on the remembered choice. The default posture is silent:
+			     nothing leaves the machine until a tier is picked. "Download only"
+			     lives inside the chooser; the toolbar's text intents (post to X /
+			     Bluesky / …) post words only, no image upload. report.js sets the data:
+			     URL src + alt (the brag text) and wires the click to the chooser. The
+			     card bakes its own honest context — the gloss + CI/turns stats as a
+			     framed callout, over the cumulative-token graph — so there's no separate
+			     on-page caption to drift from it; what you see is exactly what you'd
+			     share. -->
+			<section class="card report-panel" id="chartCard" aria-labelledby="chartTitle">
+				<h2 class="section-title visually-hidden" id="chartTitle">your clawback.md result</h2>
+				<button id="shareCardLink" class="report-card-link" type="button" title="Share or save this result — opens a sharing chooser the first time, then remembers your choice.">
+					<img id="shareCardImg" class="report-card-img" alt="" />
+				</button>
+			</section>
+		</main>
+
+		<!-- Share-consent chooser. The DEFAULT posture is silent; this dialog is
+		     what opts the user IN to sending anything off the machine. Hidden until
+		     the card (or "sharing…") opens it. report.js owns the focus trap, Escape,
+		     backdrop-cancel, focus return, and persistence. role="dialog" +
+		     aria-modal mark it modal; aria-labelledby/aria-describedby name and
+		     describe it (WCAG 4.1.2). The handle row is revealed only for the public
+		     tier. -->
+		<div id="shareDialogBackdrop" class="share-dialog-backdrop hidden">
+			<div id="shareDialog" class="share-dialog" role="dialog" aria-modal="true" aria-labelledby="shareDialogTitle" aria-describedby="shareDialogDesc">
+				<form id="shareDialogForm" class="share-dialog-form">
+					<h2 id="shareDialogTitle" class="share-dialog-title">Share your result</h2>
+					<p id="shareDialogDesc" class="share-dialog-desc">Choose what leaves your machine. Your choice is remembered on this browser — reopen “sharing…” to change it or switch back to download-only.</p>
+					<fieldset class="share-tier-set">
+						<legend class="share-tier-legend">What to share</legend>
+						<label class="share-tier">
+							<input type="radio" name="shareTier" value="local" />
+							<span class="share-tier-body">
+								<span class="share-tier-name">Download only</span>
+								<span class="share-tier-note">Save the PNG to this device. Nothing is sent anywhere.</span>
+							</span>
+						</label>
+						<label class="share-tier">
+							<input type="radio" name="shareTier" value="minimal" />
+							<span class="share-tier-body">
+								<span class="share-tier-name">Unlisted card</span>
+								<span class="share-tier-note">Send only the words shown on the card, so the host can redraw it and you can post the image. No stats, no run details, no handle.</span>
+							</span>
+						</label>
+						<label class="share-tier">
+							<input type="radio" name="shareTier" value="full" />
+							<span class="share-tier-body">
+								<span class="share-tier-name">Public card</span>
+								<span class="share-tier-note">Adds the numbers, the graph, and run details for a future leaderboard. Optionally attach a handle below.</span>
+							</span>
+						</label>
+					</fieldset>
+					<div id="shareHandleRow" class="share-handle-row hidden">
+						<label class="share-handle-label" for="shareHandleInput">Handle for the leaderboard (optional)</label>
+						<input id="shareHandleInput" class="share-handle-input" type="text" maxlength="64" autocomplete="off" inputmode="text" placeholder="@you" />
+					</div>
+					<p class="share-dialog-fineprint">Never sent, on any setting: your prompts, code, file paths, email or git identity, or any key.</p>
+					<div class="share-dialog-actions">
+						<button id="shareDialogCancel" class="action-btn ghost" type="button">Cancel</button>
+						<button id="shareDialogConfirm" class="action-btn" type="submit">Share</button>
+					</div>
+				</form>
+			</div>
+		</div>
+
+		<script type="module" src="report.js"></script>
+	</body>
+</html>
