@@ -40,7 +40,7 @@ const DEFAULT_PRICING = path.join(HERE, "..", "pricing.json");
 
 // Below this per-arm bucket count, report.md flags savings as `insufficient`
 // rather than printing a CI exploded by a near-zero baseline. Raw values stay
-// in summary.json. The reportable-headline target is >= 200 turns/arm; 30 is the floor
+// in summary.json. The TEST.md target is >= 200 turns/arm; 30 is the floor
 // below which a savings % is actively misleading.
 const MIN_REPORTABLE_N = 30;
 
@@ -455,7 +455,7 @@ function loadTurns(sources, pricing) {
 // records that predate systemStableKey. Pings carry the same systemStableKey,
 // so warmth is attributed to the gap it covered with no proxy change: for each
 // real turn, how many pings landed in (prevTurnTs, thisTurnTs] and how long
-// since the last one (ping coverage).
+// since the last one (TEST.md §2 ping coverage).
 function contextKey(rec) {
 	return `${rec.knobProfile}\u0000${rec.systemStableKey ?? rec.sessionKey ?? ""}`;
 }
@@ -501,7 +501,7 @@ export function assignGaps(turns, pings = []) {
 	}
 }
 
-// Warm-up discard — the Anthropic-side carry-over guard.
+// Warm-up discard — the Anthropic-side carry-over guard (TEST.md §6/§7).
 // Drop the first `n` real turns of each (knobProfile, systemStableKey)
 // timeline. Those opening turns are (a) the cold-start the steady-state
 // comparison should exclude and (b) the only turns that can read a PRIOR
@@ -534,7 +534,7 @@ export function discardWarmup(turns, n) {
 // system prefix (systemStableKey), per knobProfile. 1 is ideal (one logical
 // context -> one Anthropic cache key); >1 means the same context split across
 // keys, each cold-starting Anthropic's cache. strip-ephemeral collapses this to
-// 1 — computable from the log alone, no proxy change.
+// 1 — computable from the log alone, no proxy change (TEST.md §2).
 export function computePrefixFragmentation(turns) {
 	const byProfile = new Map();
 	for (const t of turns) {
@@ -1026,7 +1026,7 @@ function writeReportMd(
 	if (pingRows.length) {
 		L.push("## Keep-alive ping coverage", "");
 		L.push(
-			"Share of turns preceded by >=1 keep-alive ping during the gap, plus mean pings/turn. High coverage on a >5-min gap bucket alongside a high hit rate is keep-alive keeping the cache warm (the warmth test).",
+			"Share of turns preceded by >=1 keep-alive ping during the gap, plus mean pings/turn. High coverage on a >5-min gap bucket alongside a high hit rate is keep-alive keeping the cache warm (TEST.md §10 warmth test).",
 			"",
 		);
 		L.push(
@@ -1058,7 +1058,7 @@ function main() {
 	const sources = resolveSources(args);
 	const { turns: allTurns, pings, perSource } = loadTurns(sources, pricing);
 	// Gaps on the FULL timeline first, THEN drop each arm's warm-up turns so a
-	// kept turn keeps its true intra-arm gap (carry-over guard).
+	// kept turn keeps its true intra-arm gap (carry-over guard, TEST.md §6/§7).
 	assignGaps(allTurns, pings);
 	const turns = discardWarmup(allTurns, args.warmup);
 	const nDiscarded = allTurns.length - turns.length;

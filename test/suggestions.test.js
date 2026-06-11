@@ -3,6 +3,8 @@ import { RULES, buildContext, evaluate } from "../src/suggestions.js";
 
 void _getRing;
 
+void _getRing;
+
 function makeStore(sessions) {
 	return {
 		all: () => sessions,

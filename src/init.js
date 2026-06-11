@@ -101,7 +101,6 @@ export function initConfig({
 	cwd = process.cwd(),
 	env = process.env,
 	adminToken = null,
-	forceGitignore = false,
 } = {}) {
 	const targetPath = resolveInitTarget({
 		global: isGlobal,
@@ -122,9 +121,7 @@ export function initConfig({
 
 	const exists = fs.existsSync(targetPath);
 	if (exists && !force) {
-		const gitignore = isLocalAuto
-			? ensureGitignored(cwd, { force: forceGitignore })
-			: null;
+		const gitignore = isLocalAuto ? ensureGitignored(cwd) : null;
 		return { targetPath, action: "skipped", adminToken: null, gitignore };
 	}
 
@@ -132,29 +129,24 @@ export function initConfig({
 	const data = { ...stubSettings(), adminToken: token };
 
 	fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-	// Owner-only mode because the file holds a shared secret. The mode is
-	// passed to the create itself (not chmod'd after) so the token never
-	// sits world-readable, however briefly. mode only applies on CREATE —
-	// an existing file keeps its mode — so the chmod below covers the
-	// overwrite path. Mirrors `clawback init-cert`'s posture for key.pem.
-	fs.writeFileSync(targetPath, stringifyFrontMatter(data, STUB_BODY_DOC), {
-		encoding: "utf8",
-		mode: 0o600,
-	});
+	fs.writeFileSync(
+		targetPath,
+		stringifyFrontMatter(data, STUB_BODY_DOC),
+		"utf8",
+	);
 
-	// Overwrite path + best-effort: non-POSIX filesystems (Windows, some
-	// network mounts) silently ignore chmod; loadConfig's
-	// warnIfWorldReadable will emit a runtime warning if the mode ends up
-	// loose at use time.
+	// Owner-only mode because the file now holds a shared secret. Mirrors
+	// `clawback init-cert`'s posture for key.pem. Best-effort: non-POSIX
+	// filesystems (Windows, some network mounts) silently ignore chmod;
+	// loadConfig's warnIfWorldReadable will emit a runtime warning if
+	// the mode ends up loose at use time.
 	try {
 		fs.chmodSync(targetPath, 0o600);
 	} catch {
 		/* non-POSIX FS or insufficient perms */
 	}
 
-	const gitignore = isLocalAuto
-		? ensureGitignored(cwd, { force: forceGitignore })
-		: null;
+	const gitignore = isLocalAuto ? ensureGitignored(cwd) : null;
 
 	return {
 		targetPath,
@@ -169,10 +161,7 @@ export function initConfig({
  * (see GITIGNORE_MANAGED_ENTRIES), grouped under a `# Added by
  * \`clawback init\`` comment so the operator can see at a glance which
  * lines we own. README scopes the recommendation to "if you check the
- * repo in" — so by default we no-op when there's no `.git/` to be checked
- * in. Pass `{ force: true }` to write (and create) `.gitignore` regardless;
- * `clawback quickstart` does this so the adminToken-bearing CLAWBACK.md is
- * pre-ignored before the directory ever becomes a repo.
+ * repo in" — so we no-op when there's no `.git/` to be checked in.
  *
  * Dedupe is strict per entry: a managed entry counts as already-listed
  * only when an existing line, trimmed, equals it exactly. Broader globs
@@ -181,13 +170,10 @@ export function initConfig({
  * heavier than one extra line. The block header is written only with
  * the entries we actually add.
  *
- * @param {string} cwd
- * @param {{force?: boolean}} [opts]  force=true skips the `.git/` guard so a
- *   `.gitignore` is created even outside a repository.
  * @returns {{action: "created"|"added"|"already-present"|"skipped-no-repo", added: string[]}}
  */
-export function ensureGitignored(cwd, { force = false } = {}) {
-	if (!force && !fs.existsSync(path.join(cwd, ".git"))) {
+export function ensureGitignored(cwd) {
+	if (!fs.existsSync(path.join(cwd, ".git"))) {
 		return { action: "skipped-no-repo", added: [] };
 	}
 	const gitignorePath = path.join(cwd, ".gitignore");

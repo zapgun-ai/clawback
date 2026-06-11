@@ -8,7 +8,6 @@ import { DEFAULTS } from "../src/config.js";
 import {
 	defaultCertHostnames,
 	defaultCertIps,
-	detectMkcert,
 	initCert,
 } from "../src/init_cert.js";
 import { createLogger } from "../src/logger.js";
@@ -421,47 +420,5 @@ describe("init-cert", () => {
 			initCert({ outDir: dir, mkcert: true, mkcertBin: "/no/such/mkcert" }),
 		).toThrow(/mkcert failed to generate cert.*brew install mkcert/s);
 		fs.rmSync(dir, { recursive: true, force: true });
-	});
-});
-
-describe("detectMkcert", () => {
-	test("reports unavailable when the mkcert binary isn't on PATH (ENOENT)", () => {
-		const exec = () => {
-			const e = new Error("spawn mkcert ENOENT");
-			e.code = "ENOENT";
-			throw e;
-		};
-		const r = detectMkcert({ exec });
-		expect(r).toEqual({
-			available: false,
-			caRoot: null,
-			caRootInstalled: false,
-		});
-	});
-
-	test("reports available + caRootInstalled when rootCA.pem exists in CAROOT", () => {
-		const caRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawback-caroot-"));
-		fs.writeFileSync(path.join(caRoot, "rootCA.pem"), "ca");
-		const calls = [];
-		const exec = (file, args) => {
-			calls.push({ file, args });
-			return `${caRoot}\n`;
-		};
-		const r = detectMkcert({ exec });
-		expect(calls[0]).toEqual({ file: "mkcert", args: ["-CAROOT"] });
-		expect(r.available).toBe(true);
-		expect(r.caRoot).toBe(caRoot);
-		expect(r.caRootInstalled).toBe(true);
-		fs.rmSync(caRoot, { recursive: true, force: true });
-	});
-
-	test("reports available but caRootInstalled=false when CAROOT lacks rootCA.pem", () => {
-		const caRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawback-caroot-"));
-		const exec = () => `${caRoot}\n`;
-		const r = detectMkcert({ exec });
-		expect(r.available).toBe(true);
-		expect(r.caRoot).toBe(caRoot);
-		expect(r.caRootInstalled).toBe(false);
-		fs.rmSync(caRoot, { recursive: true, force: true });
 	});
 });

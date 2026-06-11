@@ -292,6 +292,115 @@ test("PLAN §19: 429 does not delay the next ping; failures count up; no purge",
 	expect(session.cooldownUntil).toBeUndefined();
 });
 
+test("turn-log receives a ping record per successful keep-alive", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawback-ka-tl-"));
+	const store = new SessionStore({
+		filePath: path.join(dir, "state.json"),
+		logger,
+	});
+	const turnLogFile = path.join(dir, "turns.ndjson");
+	const turnLog = createTurnLog({ filePath: turnLogFile, logger });
+	store.upsert("s3", () => ({
+		key: "s3",
+		mode: "hash",
+		reservedTokenBudget: 2,
+		keepAliveTokensUsed: 0,
+		keepAliveCount: 0,
+		authHeaders: { "x-api-key": "k" },
+		system: "sys",
+		model: "claude-sonnet-4-6",
+	}));
+
+	const scheduler = new KeepAliveScheduler({
+		config: {
+			...baseConfig,
+			keepAliveEnabled: true,
+			injectExtendedCacheTtl: true,
+		},
+		store,
+		logger,
+		turnLog,
+		fetchImpl: async () => ({
+			ok: true,
+			status: 200,
+			outputTokens: 3,
+			usage: {
+				input_tokens: 5,
+				output_tokens: 3,
+				cache_creation_input_tokens: 0,
+				cache_read_input_tokens: 1000,
+			},
+			rateLimit: {},
+			tokensReset: null,
+		}),
+	});
+
+	scheduler.ensureScheduled("s3");
+	await new Promise((r) => setTimeout(r, 350));
+	scheduler.stop();
+	turnLog.close();
+	await new Promise((r) => setTimeout(r, 20));
+
+	const lines = fs
+		.readFileSync(turnLogFile, "utf8")
+		.split("\n")
+		.filter((l) => l.length > 0);
+	expect(lines.length).toBeGreaterThanOrEqual(1);
+	const r = JSON.parse(lines[0]);
+	expect(r.arm).toBe("treatment-ping");
+	expect(r.mode).toBe("ping");
+	expect(r.sessionKey).toBe("s3");
+	expect(r.model).toBe("claude-sonnet-4-6");
+	expect(r.ttlMode).toBe("1h");
+	expect(r.usage.output_tokens).toBe(3);
+
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("PLAN §19: 429 does not delay the next ping; failures count up; no purge", async () => {
+	const store = mkStore();
+	store.upsert("s429", () => ({
+		key: "s429",
+		mode: "hash",
+		keepAliveTokensUsed: 0,
+		keepAliveCount: 0,
+		keepAliveFailures: 0,
+		authHeaders: { authorization: "Bearer k" },
+		system: "sys",
+		model: "claude-opus-4-5",
+	}));
+
+	let calls = 0;
+	const scheduler = new KeepAliveScheduler({
+		config: baseConfig,
+		store,
+		logger,
+		fetchImpl: async () => {
+			calls++;
+			return {
+				ok: false,
+				status: 429,
+				error: "Too Many Requests",
+				rateLimit: { retry_after_seconds: 3600 },
+				tokensReset: null,
+				fatal: false,
+			};
+		},
+	});
+
+	scheduler.ensureScheduled("s429");
+	await new Promise((r) => setTimeout(r, 500));
+	scheduler.stop();
+
+	// With 100ms cadence and no backoff, 500ms should fit at least 3 pings.
+	// If a 1h cooldown were applied, we'd see exactly 1.
+	expect(calls).toBeGreaterThanOrEqual(3);
+	const session = store.get("s429");
+	expect(session).toBeTruthy();
+	expect(session.keepAliveFailures).toBeGreaterThanOrEqual(3);
+	expect(session.cooldownUntil).toBeUndefined();
+});
+
 test("_shouldExpire returns grace_period_expired past target_ttl + grace", () => {
 	const store = mkStore();
 	const scheduler = new KeepAliveScheduler({

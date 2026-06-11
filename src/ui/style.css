@@ -69,6 +69,29 @@ body {
 	outline-offset: -2px;
 }
 
+/* Skip link: invisible until focused, then jumps to the chart grid so
+ * keyboard users don't have to tab through the settings panel before
+ * reaching the primary content. */
+.skip-link {
+	position: absolute;
+	top: 0;
+	left: 0;
+	padding: 8px 12px;
+	background: var(--accent);
+	color: white;
+	text-decoration: none;
+	font-weight: 600;
+	border-radius: 0 0 4px 0;
+	transform: translateY(-100%);
+	z-index: 10;
+}
+
+.skip-link:focus {
+	transform: translateY(0);
+	outline: 2px solid var(--fg);
+	outline-offset: -2px;
+}
+
 header {
 	display: flex;
 	align-items: center;
@@ -893,6 +916,884 @@ main {
 
 .capture-shadow-warn[hidden] {
 	display: none;
+}
+
+/* Banner spans the page width above the suggestions card so the
+ * operator always knows which mode clawback is in. Two states share
+ * one DOM element, swapped by `data-mode`:
+ *   - baseline   : passthrough on, interventions off (accent-active /
+ *                  brown — matches the BASELINE chip in the header).
+ *   - treatment  : passthrough off, interventions on (accent / green —
+ *                  signals the healthy "working" state).
+ * Always visible so the answer to "is clawback doing anything right
+ * now?" never requires reading the upper-left toggle. */
+.baseline-banner {
+	background: var(--accent-active);
+	color: white;
+	padding: 8px 20px;
+	font-size: 13px;
+	letter-spacing: 0.02em;
+	text-align: center;
+	max-height: 80px;
+	overflow: hidden;
+	transition: opacity 500ms ease-out, max-height 500ms ease-out, padding-top
+		500ms ease-out, padding-bottom 500ms ease-out;
+}
+
+.baseline-banner.faded {
+	opacity: 0;
+	max-height: 0;
+	padding-top: 0;
+	padding-bottom: 0;
+	pointer-events: none;
+}
+
+.baseline-banner[data-mode="treatment"] {
+	background: var(--accent);
+}
+
+.baseline-banner .banner-text {
+	display: none;
+}
+
+.baseline-banner[data-mode="baseline"] .banner-text-baseline {
+	display: inline;
+}
+
+.baseline-banner[data-mode="treatment"] .banner-text-treatment {
+	display: inline;
+}
+
+.baseline-banner strong {
+	font-weight: 700;
+	letter-spacing: 0.08em;
+}
+
+/* In-banner mirror of the master switch — inherits the banner's
+ * white-on-accent palette so the control reads as part of the banner
+ * rather than a header-toned button dropped into it. */
+.baseline-banner-toggle {
+	vertical-align: middle;
+	margin-left: 6px;
+	color: white;
+}
+
+.baseline-banner-toggle:not(.on) .enabled-switch-track {
+	background: rgba(255, 255, 255, 0.35);
+}
+
+/* When the master switch is ON, the banner background is var(--accent)
+ * and so is the default switch track — they'd blend out, leaving only
+ * the thumb visible. Invert inside the banner: white track, accent
+ * thumb. Same idea as the off-state rule above, mirrored for on. */
+.baseline-banner-toggle.on .enabled-switch-track {
+	background: white;
+}
+
+.baseline-banner-toggle.on .enabled-switch-thumb {
+	background: var(--accent);
+	box-shadow: none;
+}
+
+.baseline-banner-toggle.on {
+	color: white;
+}
+
+/* Toast container — fixed top-right, stacks vertical, each toast fades
+ * after a few seconds. aria-live=polite on the container means screen
+ * readers announce new toasts without yanking focus. */
+.toasts {
+	position: fixed;
+	top: 12px;
+	right: 12px;
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	max-width: 360px;
+	pointer-events: none;
+}
+
+.toast {
+	background: var(--card);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-left: 4px solid var(--accent);
+	border-radius: 4px;
+	padding: 8px 12px;
+	font-size: 13px;
+	line-height: 1.3;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+	pointer-events: auto;
+	animation: toast-in 180ms ease-out;
+}
+
+.toast.warn {
+	border-left-color: var(--warn);
+}
+
+.toast.leaving {
+	animation: toast-out 240ms ease-in forwards;
+}
+
+@keyframes toast-in {
+	from {
+		opacity: 0;
+		transform: translateX(8px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+@keyframes toast-out {
+	from {
+		opacity: 1;
+		transform: translateX(0);
+	}
+	to {
+		opacity: 0;
+		transform: translateX(8px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.toast,
+	.toast.leaving {
+		animation: none;
+	}
+	.suggestion,
+	.suggestion.applying,
+	.suggestion.dismissing,
+	.linked-suggestion,
+	.linked-suggestion.applying,
+	.linked-suggestion.dismissing {
+		transition: none;
+	}
+}
+
+/* Help overlay (? key) — full-page scrim + centered panel. */
+.help-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.4);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 30;
+}
+
+.help-overlay-panel {
+	background: var(--card);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 20px 24px;
+	max-width: 360px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.help-overlay-panel h2 {
+	margin: 0 0 12px;
+	font-size: 15px;
+}
+
+.help-shortcuts {
+	margin: 0 0 16px;
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 4px 12px;
+	font-size: 13px;
+}
+
+.help-shortcuts dt {
+	font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+	font-weight: 600;
+	color: var(--accent);
+}
+
+.help-shortcuts dd {
+	margin: 0;
+	color: var(--fg);
+}
+
+.help-overlay-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
+/* Linked suggestion: rendered inside a chart card, framed by a left
+ * border matching the metric color so the eye reads "this hint
+ * belongs to this chart." */
+.chart-card.has-linked-suggestion {
+	border-left-width: 4px;
+}
+
+.linked-suggestion {
+	margin-top: 6px;
+	padding: 8px 10px;
+	border-radius: 4px;
+	background: rgba(181, 103, 26, 0.08);
+	border: 1px solid var(--border);
+	font-size: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	transition: opacity 220ms ease-out, transform 220ms ease-out;
+}
+
+.linked-suggestion.leaving {
+	opacity: 0;
+	transform: translateY(-4px);
+	pointer-events: none;
+}
+
+/* Apply / Dismiss flash (linked-suggestion variant — same semantics
+ * as .suggestion.applying / .dismissing above; mirrored here because
+ * cards are rendered with a separate class chain). */
+.linked-suggestion.applying {
+	background: rgba(26, 92, 63, 0.32) !important;
+	border-color: var(--accent);
+	pointer-events: none;
+	transition: background 300ms ease-out, border-color 300ms ease-out;
+}
+
+.linked-suggestion.dismissing {
+	background: rgba(209, 26, 42, 0.32) !important;
+	border-color: var(--warn);
+	pointer-events: none;
+	transition: background 300ms ease-out, border-color 300ms ease-out;
+}
+
+.linked-suggestion.warn {
+	background: rgba(178, 58, 72, 0.08);
+	border-color: var(--warn);
+}
+
+.linked-suggestion-message {
+	margin: 0;
+	line-height: 1.4;
+}
+
+.linked-suggestion-actions {
+	display: flex;
+	gap: 4px;
+}
+
+/* Chart hover crosshair + readout chip. */
+.chart-card {
+	position: relative;
+}
+
+.chart-hover {
+	position: absolute;
+	pointer-events: none;
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	padding: 4px 6px;
+	font-size: 11px;
+	line-height: 1.3;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+	font-variant-numeric: tabular-nums;
+	max-width: 220px;
+	z-index: 2;
+}
+
+.chart-hover .ts {
+	color: var(--muted);
+	font-size: 10px;
+}
+
+.chart-hover .row {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+
+.chart-hover .swatch {
+	display: inline-block;
+	width: 10px;
+	height: 2px;
+	border-radius: 1px;
+}
+
+.chart-hover.hidden {
+	display: none;
+}
+
+/* Severity badge on suggestion cards — tightens visual urgency. */
+.suggestion-severity {
+	display: inline-block;
+	width: 1.4em;
+	text-align: center;
+	font-weight: 700;
+	font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+	margin-right: 6px;
+	border-radius: 2px;
+	padding: 0 4px;
+}
+
+.suggestion-severity.info {
+	background: var(--accent);
+	color: white;
+}
+
+.suggestion-severity.warn {
+	background: var(--warn);
+	color: white;
+}
+
+/* Phone-width breakpoint: collapse every multi-column layout to a
+ * single column, shrink chart heights/padding, and tighten the
+ * header so the whole UI fits on a narrow viewport without
+ * horizontal scrolling. */
+@media (max-width: 599px) {
+	header {
+		padding: 6px 10px;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 6px;
+	}
+	.title-block {
+		justify-content: space-between;
+	}
+	.status-bar {
+		flex-wrap: wrap;
+		justify-content: flex-start;
+		row-gap: 6px;
+	}
+	main {
+		padding: 6px 8px;
+		gap: 8px;
+		max-width: 100%;
+	}
+	.card {
+		padding: 8px;
+	}
+	.settings-row-2col,
+	.charts-grid {
+		grid-template-columns: 1fr;
+	}
+	.settings-group-grid {
+		grid-template-columns: 1fr !important;
+	}
+	.mode-toggle {
+		min-width: 0;
+		font-size: 11px;
+	}
+	.overview-chart {
+		min-height: 200px;
+	}
+	.overview-header {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+	.chart-card {
+		padding: 8px 8px 6px;
+	}
+	.mini-chart {
+		min-height: 150px;
+	}
+	.chart-card-header {
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+	.sessions-controls {
+		gap: 6px;
+	}
+	.sessions-controls-right {
+		/* On phones the right-align lets the destructive cluster wrap
+		 * onto its own row but stay flush right, which is what we want. */
+		width: 100%;
+		margin-left: 0;
+	}
+	.sessions-table {
+		font-size: 11px;
+	}
+	.sessions-table th,
+	.sessions-table td {
+		padding: 5px 6px;
+	}
+	.sessions-table .session-label {
+		max-width: 18ch;
+	}
+	.sessions-table .row-actions button {
+		font-size: 10px;
+		padding: 2px 6px;
+	}
+	.suggestions-header {
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.suggestions-bulk {
+		display: inline-flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.help-overlay-panel {
+		max-width: 90vw;
+		padding: 16px;
+	}
+	.toasts {
+		left: 8px;
+		right: 8px;
+		max-width: none;
+	}
+}
+
+/* Settings row: places network and ops groups side-by-side on wider
+ * viewports so they don't waste vertical space. */
+.settings-row-2col {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 16px;
+}
+
+@media (min-width: 720px) {
+	.settings-row-2col {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+
+/* The settings-group-grid inside these single-toggle groups would
+ * otherwise re-apply its own 2-col split at the same breakpoint —
+ * collapsing the lone toggle into 1/4 of the card width instead of
+ * filling its half-card slot. Force 1-col here so each toggle stays
+ * the same visual size as the 2x2 cache toggles. */
+.settings-row-2col .settings-group-grid {
+	grid-template-columns: 1fr;
+}
+
+/* Overview section: a tall, full-width composite chart at the top of
+ * the dashboard. All seven metrics overlay on a 0-100% y-axis; ttft
+ * and tps are normalized against their threshold-high values. The
+ * legend below shows each metric's latest raw value with its line
+ * color. */
+.overview-section {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.overview-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.overview-chart {
+	width: 100%;
+	min-height: 260px;
+	position: relative;
+}
+
+.overview-chart svg {
+	display: block;
+	width: 100%;
+	height: auto;
+}
+
+.overview-legend {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+}
+
+.overview-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.overview-legend-swatch {
+	display: inline-block;
+	width: 14px;
+	height: 3px;
+	border-radius: 1px;
+}
+
+.overview-legend-label {
+	color: var(--muted);
+	align-items: center;
+}
+
+.overview-legend-value {
+	color: var(--fg);
+	font-weight: 600;
+}
+
+/* Baseline reference line drawn on each per-metric chart when there
+ * are samples captured during passthrough. Stroke is the metric color
+ * with low opacity + a long dash so it reads as a reference, not a
+ * data line. The +/- delta chip lives in the chart card header. */
+.chart-card-baseline {
+	font-variant-numeric: tabular-nums;
+	font-size: 11px;
+	color: var(--muted);
+	margin-left: 6px;
+}
+
+.chart-card-baseline.better {
+	color: var(--ok);
+}
+
+.chart-card-baseline.worse {
+	color: var(--warn);
+}
+
+/* Sessions table: replaces the chip-row filter with a tabular view
+ * of all known sessions, one row each. Columns are the statusline
+ * metric averages plus actions. The focus button restricts the
+ * charts to a single session; click again (or the global clear-focus
+ * button) to release. */
+.sessions-table-wrapper {
+	width: 100%;
+	overflow-x: auto;
+}
+
+.sessions-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+}
+
+.sessions-table th,
+.sessions-table td {
+	padding: 6px 8px;
+	text-align: right;
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+
+.sessions-table thead th {
+	color: var(--muted);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-size: 10px;
+}
+
+.sessions-table th:first-child,
+.sessions-table td:first-child {
+	text-align: left;
+}
+
+.sessions-table tbody tr.focused {
+	background: rgba(42, 127, 92, 0.08);
+}
+
+.sessions-table tbody tr.hidden-session td {
+	opacity: 0.45;
+}
+
+.sessions-table .session-label {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 28ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Inline evicted indicator next to the label — visible on every
+ * viewport so phone users (where the dedicated evict column is
+ * hidden) still see when a session's cache has lapsed. */
+.sessions-table .evict-flag {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 1px 6px;
+	border-radius: 2px;
+	background: var(--warn);
+	color: white;
+	animation: evict-flash 1s steps(2, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sessions-table .evict-flag {
+		animation: none;
+		text-decoration: underline;
+	}
+}
+
+.sessions-table .session-swatch {
+	display: inline-block;
+	width: 14px;
+	height: 4px;
+	border-radius: 1px;
+	flex-shrink: 0;
+}
+
+.sessions-table .row-actions {
+	display: inline-flex;
+	gap: 4px;
+	justify-content: flex-end;
+}
+
+.sessions-table .row-actions button {
+	font-size: 11px;
+	padding: 2px 8px;
+}
+
+.sessions-table .row-actions .focus-btn.active {
+	background: var(--accent);
+	color: white;
+	border-color: var(--accent);
+}
+
+.sessions-table-empty {
+	padding: 18px 8px;
+	color: var(--muted);
+	font-style: italic;
+	font-size: 12px;
+	text-align: center;
+}
+
+/* Cache-eviction countdown cell: color by remaining-TTL band. The
+ * "evicted" state pulses to draw attention since it means the next
+ * turn pays full cache-creation cost. */
+.sessions-table .evict-cell[data-evict-state="green"] {
+	color: var(--ok);
+}
+.sessions-table .evict-cell[data-evict-state="yellow"] {
+	color: var(--accent-active);
+}
+.sessions-table .evict-cell[data-evict-state="red"] {
+	color: var(--warn);
+}
+.sessions-table .evict-cell[data-evict-state="evicted"] {
+	color: var(--warn);
+	font-weight: 700;
+	animation: evict-flash 1s steps(2, end) infinite;
+}
+
+@keyframes evict-flash {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sessions-table .evict-cell[data-evict-state="evicted"] {
+		animation: none;
+		text-decoration: underline;
+	}
+}
+
+/* Phone-width narrowing: hide the per-metric columns so only the
+ * session label and the action buttons remain — the metric averages
+ * are still visible per-chart on the cards above. */
+@media (max-width: 599px) {
+	.sessions-table .metric-col {
+		display: none;
+	}
+}
+
+.sessions-focus-indicator {
+	background: var(--accent);
+	color: white;
+	padding: 1px 8px;
+	border-radius: 3px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.legend-note .keep-alive {
+	color: #3a6fb0;
+}
+
+.legend-note .strip-ephemeral {
+	color: var(--ok);
+}
+
+.legend-note .extend-cache-ttl {
+	color: #b5671a;
+}
+
+.legend-note .mobile {
+	color: #7a5fb0;
+}
+
+.legend-note .keep-alive-extended {
+	color: #2a7f5c;
+}
+
+.legend-note .auto-continue {
+	color: #c04a5a;
+}
+
+.hidden {
+	/* Utility class: must beat any element-specific `display` rule (e.g.
+	 * `.help-overlay { display: flex }`) regardless of source order. */
+	display: none !important;
+}
+
+.suggestions {
+	border-color: var(--accent-active);
+	border-left-width: 4px;
+}
+
+.suggestions-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 8px;
+	gap: 8px;
+}
+
+.suggestions-bulk {
+	display: inline-flex;
+	gap: 6px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
+.suggestions-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+/* Reset-only mode: when every firing suggestion has been dismissed
+ * we keep the card visible (so the reset button remains reachable)
+ * and show this one-line note. */
+.suggestion-empty-note {
+	margin: 0;
+	color: var(--muted);
+	font-size: 12px;
+	font-style: italic;
+}
+
+.suggestion {
+	padding: 10px 12px;
+	border-radius: 4px;
+	background: rgba(181, 103, 26, 0.08);
+	border: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	transition: opacity 220ms ease-out, transform 220ms ease-out;
+}
+
+.suggestion.leaving {
+	opacity: 0;
+	transform: translateY(-4px);
+	pointer-events: none;
+}
+
+.suggestion-warn {
+	background: rgba(178, 58, 72, 0.08);
+	border-color: var(--warn);
+}
+
+.suggestion-message {
+	margin: 0;
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+.suggestion-actions {
+	display: flex;
+	gap: 6px;
+}
+
+.filter-btn.primary {
+	background: var(--accent);
+	color: white;
+	border-color: var(--accent);
+	font-weight: 600;
+}
+
+.filter-btn.primary:hover:not(:disabled) {
+	filter: brightness(1.1);
+}
+
+/* Mode summary chip in the header — at-a-glance "what's clawback doing
+ * right now" without having to read every toggle. Tabular numerics so
+ * the chip's width is stable across "0/8" → "8/8". */
+.mode-summary {
+	font-variant-numeric: tabular-nums;
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	padding: 1px 10px;
+	font-size: 12px;
+	color: var(--fg);
+}
+
+.mode-summary.baseline {
+	background: var(--accent-active);
+	color: white;
+	border-color: var(--accent-active);
+	font-weight: 600;
+	letter-spacing: 0.04em;
+}
+
+/* Continue-working button: always visible in the header so the
+ * affordance is discoverable; disabled when no claude PTY is attached.
+ * Action-btn.primary so it visually competes for the eye against the
+ * toggles below. */
+.action-btn.primary {
+	background: var(--accent);
+	color: white;
+	border-color: var(--accent);
+	font-weight: 600;
+}
+
+.action-btn.primary:hover:not(:disabled) {
+	filter: brightness(1.1);
+}
+
+.action-btn.ghost {
+	color: var(--muted);
+	font-weight: 400;
+}
+
+.help-btn {
+	min-width: 28px;
+	font-size: 13px;
+	line-height: 1;
+	font-weight: 600;
+}
+
+/* Capture-baseline button: a header action like the continue button.
+ * Distinct from primary so it doesn't compete with "continue working"
+ * for visual weight, but bordered enough to read as an action. */
+.capture-baseline-btn {
+	background: transparent;
+	color: var(--fg);
+	border: 1px solid var(--accent-active);
+	padding: 4px 10px;
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
+.capture-baseline-btn:hover:not(:disabled) {
+	filter: brightness(1.06);
+	background: rgba(138, 78, 10, 0.08);
+}
+
+.capture-baseline-btn.active {
+	background: var(--accent-active);
+	color: white;
 }
 
 /* Banner spans the page width above the suggestions card so the

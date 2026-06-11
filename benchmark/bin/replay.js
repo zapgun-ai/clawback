@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * HTTP replay load generator (the "reproducible" load arm).
+ * HTTP replay load generator (the "reproducible" arm of TEST.md §4b).
  *
  * Replays ONE captured Claude-Code `/v1/messages` body against a running
  * clawback proxy at a scripted inter-turn gap schedule. Because every turn
@@ -19,7 +19,7 @@
  *     and mint a fresh id per invocation so clawback treats each block as a
  *     new session. Free; no body change.
  *   - ANTHROPIC KEY (Anthropic-owned cache key): to defeat the carry-over
- *     confound, we prepend a unique nonce text block to `system`
+ *     confound (TEST.md §7) we prepend a unique nonce text block to `system`
  *     by default, cold-starting Anthropic's prefix cache for THIS block while
  *     preserving every downstream cache_control breakpoint. Pass
  *     --shared-cache to reuse a warm cache across runs (e.g. to measure a

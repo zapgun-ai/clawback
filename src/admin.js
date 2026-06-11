@@ -67,22 +67,14 @@ export async function handleAdmin(
 	// browser can still fire same-origin POSTs without auth, and DNS
 	// rebinding can reach a loopback-bound proxy from any webpage. See
 	// assertOriginSafe for the specific checks (Host vs accepting
-	// interface, Origin match, Content-Type on writes) and for when a
-	// presented admin bearer skips the Host/Origin layer.
+	// interface, Origin match, Content-Type on writes).
 	//
-	// Exemption: the statusline endpoint is called from the operator's
-	// claude statusLine command (already-installed `curl` line in
-	// ~/.claude/settings.json). That curl sends no Content-Type (so the
-	// JSON gate would 415 it) and remote setups POST to a hostname (so the
-	// Host gate would 421 them) — full hardening would silently break
-	// every deployed integration until `clawback setup claude --force`.
-	// Instead it gets the one check those callers never trip: no browser
-	// may WRITE to it. curl never sends an Origin header; browsers always
-	// attach one to cross-origin POSTs (including `Origin: null` from
-	// sandboxed iframes), so rejecting Origin-bearing writes closes the
-	// rebound-page vector at zero compat cost. The endpoint only writes to
-	// the metrics ring — no state mutation, no PTY access — so this
-	// bounded gate is proportionate.
+	// Exemption: the statusline POST is called from the operator's claude
+	// statusLine command (already-installed `curl` line in
+	// ~/.claude/settings.json). Tightening it would break every
+	// pre-existing operator's statusline until they re-ran
+	// `clawback setup claude --force`. The endpoint only writes to the
+	// metrics ring — no state mutation, no PTY access.
 	//
 	// Exemption: the /report saved-run viewer is read-only and deliberately
 	// fully public (no token) so a saved run can be opened and linked from a
@@ -91,23 +83,9 @@ export async function handleAdmin(
 	// analyzer's already-priced benchmark outputs (no secrets, no mutation).
 	// Only the read (non-write) methods are exempt; a write to /report still
 	// hits the gate (and the report server only answers GETs anyway).
-	const providedBearer = parseBearer(req.headers.authorization);
-	const bearerOk =
-		config?.adminToken != null &&
-		providedBearer != null &&
-		tokenMatches(providedBearer, config.adminToken);
 	const reportRead = parts[1] === "report" && !isWriteMethod(req.method);
-	if (parts[1] === "statusline") {
-		if (isWriteMethod(req.method) && req.headers.origin != null) {
-			return respond(403, {
-				error: "forbidden",
-				message:
-					"statusline writes accept no browser traffic (Origin header present); " +
-					"this endpoint exists for the claude statusLine curl integration",
-			});
-		}
-	} else if (!reportRead) {
-		const csrfReject = assertOriginSafe(req, config, bearerOk);
+	if (!(parts[1] === "statusline" || reportRead)) {
+		const csrfReject = assertOriginSafe(req, config);
 		if (csrfReject) return respond(csrfReject.status, csrfReject.body);
 	}
 
@@ -118,7 +96,8 @@ export async function handleAdmin(
 	// Loopback is exempt so a same-host operator can click the UI control
 	// buttons without typing a token anywhere.
 	if (config?.adminToken && isWriteMethod(req.method) && !isLoopback(req)) {
-		if (!bearerOk) {
+		const provided = parseBearer(req.headers.authorization);
+		if (!provided || !tokenMatches(provided, config.adminToken)) {
 			return respond(401, {
 				error: "unauthorized",
 				message:
@@ -153,7 +132,723 @@ export async function handleAdmin(
 		//
 		// PLAN §39 (Phase 1): per-session routing. The optional path suffix
 		// /_proxy/statusline/<id> identifies which clawback session this
-		// render is for; the rendered text uses that session's hit/tps
+		// render is for; the rendered text uses that session's hit/tps/ttft
+		// and the per-session metrics ring receives the sample. The legacy
+		// /_proxy/statusline (no id, or id == "_default") falls back to the
+		// mostRecentSession-style aggregate render.
+		if (req.method !== "GET" && req.method !== "POST") {
+			return respond(405, {
+				error: "method_not_allowed",
+				allow: ["GET", "POST"],
+			});
+		}
+		const requestedSessionId =
+			parts[2] && parts[2] !== "_default" ? parts[2] : null;
+		const clawbackSession =
+			requestedSessionId != null ? store.get(requestedSessionId) : null;
+		const sessionLabel =
+			clawbackSession?.label ??
+			(requestedSessionId != null ? requestedSessionId : null);
+
+		let claudeSession = null;
+		if (req.method === "POST") {
+			try {
+				const body = await readJsonBody(req, 64 * 1024);
+				claudeSession = body && typeof body === "object" ? body : null;
+			} catch {
+				// Malformed body: don't break the operator's statusline. Fall
+				// through to clawback-only render.
+				claudeSession = null;
+			}
+		}
+		// Plan-quota windows (five_hour/seven_day) are account-global, not
+		// per-session (PLAN §12.2): record this POST's quota into the shared
+		// store, then render EVERY session from that freshest value so an idle
+		// session no longer shows a stale, too-low quota. `accountGlobalQuota`
+		// off restores strict per-session rendering (the multi-account escape
+		// hatch — see §23). Recording is POST-only (a GET carries no payload);
+		// the overlay is a no-op until something has been recorded, so the
+		// pure-render tests that bypass this handler are unaffected.
+		const accountGlobal = config.accountGlobalQuota !== false;
+		if (accountGlobal && req.method === "POST") {
+			recordQuotaObservation(claudeSession?.rate_limits);
+		}
+		const effectiveSession = accountGlobal
+			? overlayAccountQuota(claudeSession)
+			: claudeSession;
+		const text = renderStatusline({
+			config,
+			store,
+			claudeSession: effectiveSession,
+			clawbackSession,
+			sessionLabel,
+			requestedSessionId,
+			// The statusline is rendered by Claude Code's ANSI-capable TUI,
+			// not by this server's stdout. The server runs headless (a
+			// background daemon), so resolving color off its own
+			// process.stdout.isTTY would wrongly strip color from a sink
+			// that supports it (operator-flagged 2026-05-28). Resolve as
+			// isatty:true; explicit statuslineColor "off" and NO_COLOR
+			// (operator kill-switch) still win inside resolveStatuslineColor.
+			colorEnabled: resolveStatuslineColor({ config, isatty: true }),
+		});
+		// PLAN §33: also feed the metrics ring so the web UI can plot
+		// the values that just got rendered. Only do this on POST —
+		// plain GETs have no claude attached and the chart would just
+		// see noise from whatever clawback session happens to be
+		// freshest.
+		if (req.method === "POST") {
+			try {
+				// Mirror renderStatusline's scoping: a scoped request whose
+				// session isn't in the store yet must not borrow a sibling's
+				// tps/ttft into the chart sample (it's keyed by this session's
+				// id below). Only the legacy no-id path uses mostRecentSession.
+				const recentSession =
+					clawbackSession ??
+					(requestedSessionId != null ? null : mostRecentSession(store));
+				const claudeAttached =
+					effectiveSession != null &&
+					typeof effectiveSession === "object" &&
+					!Array.isArray(effectiveSession);
+				const claudeIsFresh =
+					claudeAttached &&
+					effectiveSession.context_window?.current_usage == null;
+				const sample = extractMetricsSample({
+					claudeSession: effectiveSession,
+					recentSession,
+					claudeIsFresh,
+					claudeAttached,
+				});
+				appendSample({
+					source: "statusline",
+					sessionKey: requestedSessionId ?? undefined,
+					label: sessionLabel,
+					...sample,
+					mode: sampleModeSnapshot(config),
+				});
+			} catch (e) {
+				logger?.warn?.(`statusline metrics append failed: ${e.message}`);
+			}
+		}
+		if (res.headersSent) return;
+		res.writeHead(200, {
+			"content-type": "text/plain; charset=utf-8",
+			"cache-control": "no-cache",
+		});
+		res.end(text);
+		return;
+	}
+
+	if (parts[1] === "claude" && parts[2] === "input") {
+		if (req.method === "GET") {
+			return respond(200, {
+				active: hasActiveInput(),
+				label: activeInputLabel(),
+				remote: activeRemoteRegistration(),
+			});
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (!body || typeof body.text !== "string") {
+				return respond(400, {
+					error: "bad_request",
+					message: "body must be {text: string}",
+				});
+			}
+			const result = await writeInput(body.text);
+			if (result.written) return respond(200, result);
+			return respond(503, result);
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	// Reverse channel for cross-process attach. A `clawback claude` launcher
+	// that attached to this proxy POSTs here with its loopback callback
+	// URL + token; writeInput() then routes input back to that launcher's
+	// PTY. DELETE clears the registration (called on launcher exit).
+	if (parts[1] === "claude" && parts[2] === "register") {
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (!body || typeof body.url !== "string") {
+				return respond(400, {
+					error: "bad_request",
+					message: "body must be {url: string, token?: string, label?: string}",
+				});
+			}
+			try {
+				registerRemoteInput({
+					url: body.url,
+					token: typeof body.token === "string" ? body.token : null,
+					label: typeof body.label === "string" ? body.label : undefined,
+				});
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			logger?.info?.(
+				`claude PTY remote input registered (${body.url}, label=${body.label ?? "claude-remote"})`,
+			);
+			return respond(200, {
+				registered: true,
+				remote: activeRemoteRegistration(),
+			});
+		}
+		if (req.method === "DELETE") {
+			clearRemoteInput();
+			logger?.info?.("claude PTY remote input cleared");
+			return respond(200, { cleared: true });
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["POST", "DELETE"],
+		});
+	}
+
+	if (parts[1] === "passthrough") {
+		if (req.method === "GET") {
+			return respond(200, passthroughStatus(config));
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			const enabled = resolvePassthroughToggle(body, config);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyPassthrough(enabled, { config, scheduler, logger });
+			return respond(200, passthroughStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "keep-alive") {
+		if (req.method === "GET") {
+			return respond(200, {
+				keepAliveEnabled: Boolean(config.keepAliveEnabled),
+				passthrough: Boolean(config.passthrough),
+			});
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			// PLAN §33: while passthrough is on, this knob is force-pinned
+			// off (loadConfig's post-merge override). Re-enabling keep-alive
+			// mid-baseline would corrupt the experiment — refuse with 409
+			// rather than silently letting it through.
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before toggling keep-alive",
+				});
+			}
+			const enabled = resolveFlagToggle(body, config.keepAliveEnabled);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyKeepAlive(enabled, { config, scheduler, logger });
+			return respond(200, {
+				keepAliveEnabled: Boolean(config.keepAliveEnabled),
+				passthrough: Boolean(config.passthrough),
+			});
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "strip-ephemeral") {
+		if (req.method === "GET") {
+			return respond(200, {
+				stripEphemeralFromSystem: Boolean(config.stripEphemeralFromSystem),
+				passthrough: Boolean(config.passthrough),
+			});
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before toggling strip-ephemeral",
+				});
+			}
+			const enabled = resolveFlagToggle(body, config.stripEphemeralFromSystem);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyStripEphemeral(enabled, { config, logger });
+			return respond(200, {
+				stripEphemeralFromSystem: Boolean(config.stripEphemeralFromSystem),
+				passthrough: Boolean(config.passthrough),
+			});
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "extend-cache-ttl") {
+		if (req.method === "GET") {
+			return respond(200, extendCacheTtlStatus(config));
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before toggling extend-cache-ttl",
+				});
+			}
+			const enabled = resolveFlagToggle(body, config.injectExtendedCacheTtl);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyExtendCacheTtl(enabled, { config, logger });
+			return respond(200, extendCacheTtlStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "strip-extended-cache-ttl") {
+		if (req.method === "GET") {
+			return respond(200, stripExtendCacheTtlStatus(config));
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before toggling strip-extended-cache-ttl",
+				});
+			}
+			const enabled = resolveFlagToggle(body, config.stripExtendedCacheTtl);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyStripExtendCacheTtl(enabled, { config, logger });
+			return respond(200, stripExtendCacheTtlStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "mobile") {
+		if (req.method === "GET") {
+			return respond(200, mobileStatus(config));
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			const enabled = resolveFlagToggle(body, config.mobile);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyMobile(enabled, { config, logger });
+			return respond(200, mobileStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "keep-alive-extended") {
+		if (req.method === "GET") {
+			return respond(200, keepAliveExtendedStatus(config));
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before toggling keep-alive-extended",
+				});
+			}
+			const enabled = resolveFlagToggle(body, config.keepAliveModeExtended);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyKeepAliveExtended(enabled, { config, logger });
+			return respond(200, keepAliveExtendedStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "auto-continue") {
+		if (req.method === "GET") {
+			return respond(200, autoContinueStatus(config));
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			// While passthrough is on, this knob is force-pinned off so
+			// the baseline arm is honest. A mid-window flip would itself
+			// be a toggle event in the measurement; refuse with 409 and
+			// let the operator exit passthrough first. Mirrors the
+			// guard on keep-alive / strip-ephemeral / extend-cache-ttl.
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before toggling auto-continue",
+				});
+			}
+			const enabled = resolveFlagToggle(body, config.autoContinue);
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
+				});
+			}
+			applyAutoContinue(enabled, { config, logger });
+			return respond(200, autoContinueStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "stack") {
+		// Composite apply target for the suggestion engine's long-session
+		// stack rules (stack-cold-suggest-all, stack-partial-completion).
+		// Flips keep-alive + 1h TTL + extended cadence together so one
+		// click takes the operator from cold to the full §3.4/§5.1/§5.2
+		// stack. Not exposed as a UI toggle — there's no 8th knob — but
+		// the apply endpoint exists so the suggestion cards' button works.
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before applying the stack",
+				});
+			}
+			const action =
+				typeof body?.action === "string" ? body.action.toLowerCase() : null;
+			const enabled =
+				typeof body?.enabled === "boolean"
+					? body.enabled
+					: action === "on" || action === "enable"
+						? true
+						: action === "off" || action === "disable"
+							? false
+							: null;
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'on'|'off'|'enable'|'disable'}",
+				});
+			}
+			applyKeepAlive(enabled, { config, scheduler, logger });
+			applyExtendCacheTtl(enabled, { config, logger });
+			applyKeepAliveExtended(enabled, { config, logger });
+			return respond(200, {
+				keepAliveEnabled: Boolean(config.keepAliveEnabled),
+				injectExtendedCacheTtl: Boolean(config.injectExtendedCacheTtl),
+				keepAliveModeExtended: Boolean(config.keepAliveModeExtended),
+			});
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["POST"],
+		});
+	}
+
+	if (parts[1] === "tight-loop") {
+		// Composite apply target for the strip-1h-tight-loop suggestion.
+		// "on" forces the documented 5m TTL (strips the native 1h headers
+		// Claude Code writes) AND drops keep-alive back to the fast 1-4 min
+		// cadence that matches a 5m cache — the two halves of the tight-loop
+		// fix. Unlike `stack` it applies fixed polarities, not one uniform
+		// boolean: strip ON but extended-cadence OFF. "off" only lifts the
+		// strip; it leaves the cadence where the operator left it (symmetric
+		// with strip-extended-cache-ttl, which doesn't presume to restore 1h
+		// inject on disable). Not a UI knob — the apply endpoint exists so
+		// the suggestion card's one-click button works.
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			if (config.passthrough) {
+				return respond(409, {
+					error: "conflict",
+					message:
+						"passthrough is enabled; exit passthrough before applying the tight-loop fix",
+				});
+			}
+			const action =
+				typeof body?.action === "string" ? body.action.toLowerCase() : null;
+			const enabled =
+				typeof body?.enabled === "boolean"
+					? body.enabled
+					: action === "on" || action === "enable"
+						? true
+						: action === "off" || action === "disable"
+							? false
+							: null;
+			if (typeof enabled !== "boolean") {
+				return respond(400, {
+					error: "bad_request",
+					message:
+						"body must be {enabled: bool} or {action: 'on'|'off'|'enable'|'disable'}",
+				});
+			}
+			applyStripExtendCacheTtl(enabled, { config, logger });
+			if (enabled) applyKeepAliveExtended(false, { config, logger });
+			return respond(200, {
+				stripExtendedCacheTtl: Boolean(config.stripExtendedCacheTtl),
+				injectExtendedCacheTtl: Boolean(config.injectExtendedCacheTtl),
+				keepAliveModeExtended: Boolean(config.keepAliveModeExtended),
+			});
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["POST"],
+		});
+	}
+
+	if (parts[1] === "capture-baseline") {
+		if (req.method === "GET") {
+			return respond(200, captureBaselineStatus(config));
+		}
+		if (req.method === "POST") {
+			let body = {};
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			// Optional per-capture overrides. `shadow` opts into the ~2x-cost
+			// turn-matched capture that keeps the armed knobs live; `turns`
+			// overrides the window length for this run only.
+			const shadow =
+				typeof body?.shadow === "boolean" ? body.shadow : undefined;
+			const turns =
+				Number.isFinite(body?.turns) && body.turns > 0
+					? Math.floor(body.turns)
+					: undefined;
+			startBaselineCapture(config, {
+				store,
+				scheduler,
+				logger,
+				shadow,
+				turns,
+			});
+			return respond(200, captureBaselineStatus(config));
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "suggestions" && req.method === "GET") {
+		const context = buildContext({
+			config,
+			store,
+			samples: listSamples({ limit: MAX_SAMPLES_PER_SESSION }),
+			turnLogFile: config?.turnLogFile ?? null,
+		});
+		const suggestions = evaluate(context);
+		return respond(200, { suggestions });
+	}
+
+	if (parts[1] === "metrics") {
+		if (req.method === "GET") {
+			const sinceParam = url.searchParams.get("since");
+			const limitParam = url.searchParams.get("limit");
+			// PLAN §39 (Phase 1): optional ?session=<id> filter restricts
+			// the returned samples to a single session's ring. Omitted
+			// query → merged samples across all rings (chronological).
+			const sessionParam = url.searchParams.get("session");
+			const limit =
+				limitParam != null && Number.isFinite(Number(limitParam))
+					? Math.max(0, Math.floor(Number(limitParam)))
+					: MAX_SAMPLES_PER_SESSION;
+			const samples = listSamples({
+				session: sessionParam || null,
+				since: sinceParam || null,
+				limit,
+			});
+			return respond(200, {
+				samples,
+				capacity: MAX_SAMPLES_PER_SESSION,
+				returned: samples.length,
+				session: sessionParam || null,
+			});
+		}
+		if (req.method === "POST") {
+			let body;
+			try {
+				body = await readJsonBody(req);
+			} catch (e) {
+				return respond(400, { error: "bad_request", message: e.message });
+			}
+			const action =
+				typeof body?.action === "string" ? body.action.toLowerCase() : null;
+			if (action !== "clear") {
+				return respond(400, {
+					error: "bad_request",
+					message: "body must be {action: 'clear'}",
+				});
+			}
+			// PLAN §39 (Phase 1): optional {session: "<id>"} in the body
+			// clears just that ring; omitted clears every ring (legacy
+			// behaviour, the UI's "clear history" button).
+			const sessionArg =
+				typeof body?.session === "string" && body.session.length > 0
+					? body.session
+					: null;
+			const cleared = clearSamples({ session: sessionArg });
+			appendEvent({
+				type: "metrics-cleared",
+				text: sessionArg
+					? `metrics ring cleared for session=${sessionArg} (${cleared} samples)`
+					: `metrics ring cleared (${cleared} samples)`,
+			});
+			return respond(200, {
+				cleared: true,
+				count: cleared,
+				session: sessionArg,
+			});
+		}
+		return respond(405, {
+			error: "method_not_allowed",
+			allow: ["GET", "POST"],
+		});
+	}
+
+	if (parts[1] === "ui" && uiServer) {
+		const subPath = parts.slice(2).join("/");
+		return uiServer.handle(req, res, subPath);
+	}
+
+	if (parts[1] === "report" && reportServer) {
+		logger?.debug?.(`admin ${req.method} ${url.pathname} → report`);
+		return reportServer.handle(req, res, parts.slice(2), { config });
+	}
+
+	if (parts[1] === "events" && req.method === "GET") {
+		const limit = Number.parseInt(url.searchParams.get("limit") ?? "200", 10);
+		return respond(200, {
+			events: listEvents({ limit: Number.isNaN(limit) ? 200 : limit }),
+		});
+	}
+
+	if (parts[1] === "statusline") {
+		// PLAN §29: plain-text endpoint for Claude Code's statusLine command.
+		// GET returns clawback state only (simple `curl` integration). POST
+		// accepts the JSON session data Claude Code passes on stdin and
+		// merges claude-reported fields (model, context %, cost) into the line.
+		//
+		// PLAN §39 (Phase 1): per-session routing. The optional path suffix
+		// /_proxy/statusline/<id> identifies which clawback session this
+		// render is for; the rendered text uses that session's hit/tps/ttft
 		// and the per-session metrics ring receives the sample. The legacy
 		// /_proxy/statusline (no id, or id == "_default") falls back to the
 		// mostRecentSession-style aggregate render.
@@ -1061,7 +1756,7 @@ function byteSize(v) {
  *
  *   <prefix>context ████░░░░ XX% · day ████░░░░ XX% · week ████░░░░ XX%
  *     · cache ████░░░░ XX% · turn ████░░░░ XX%
- *     · tps ▁▃▆█▂▅▇▄ N · clawback.md
+ *     · tps ▁▃▆█▂▅▇▄ N · ttft ▆▅▃▂▁▂▁▁ M
  *
  * Capped at `statuslineMaxChars` with a trailing "…" if truncated.
  *
@@ -1096,13 +1791,9 @@ function byteSize(v) {
  *   `context_window.current_usage` (last API call's breakdown).
  * - `tps`: output tokens/second of the most-recent turn. Sparkline
  *   shows the previous SPARK_LEN turns from `session.recentTps`.
- * - `brand`: the static `clawback.md` chip — marketing, not a metric
- *   (operator-requested 2026-06-09). It occupies the slot of the
- *   retired ttft field; TTFT itself is still captured per turn
- *   (`session.recentTtftMs`) and surfaced in the web UI's ttft chart
- *   and `extractMetricsSample`, just not rendered here. Hidden when
- *   no claude is attached and no session exists, preserving the
- *   "nothing to report → empty string" contract.
+ * - `ttft`: time-to-first-token of the most-recent turn (ms). Sparkline
+ *   shows the previous SPARK_LEN turns from `session.recentTtftMs`.
+ *   Lower is better — a falling trend means the cache is warming.
  *
  * Cost (`cost.total_cost_usd`) is intentionally not surfaced —
  * clawback's pricing table is unreliable; `benchmark/` is the right
@@ -1147,13 +1838,13 @@ export function renderStatusline({
 	// SPARK_LEN — they're a different visualization with different needs.
 	const barLen = config.statuslineProgressBarLength ?? 8;
 
-	// A scoped per-session request renders THAT session's own hit/tps.
+	// A scoped per-session request renders THAT session's own hit/tps/ttft.
 	// When the session has no store entry yet (claude just launched, or no
 	// /v1/messages forwarded since boot), fall back to the *waiting
 	// placeholder* below — NOT mostRecentSession, which would borrow a
 	// sibling session's numbers and make every idle session's statusline
-	// look identical ("same across sessions", operator-flagged
-	// 2026-06-02). The mostRecentSession aggregate is the
+	// look identical ("same across sessions; ttft always green",
+	// operator-flagged 2026-06-02). The mostRecentSession aggregate is the
 	// right answer ONLY for the legacy no-id (`_default`) endpoint, where
 	// there is no specific session to scope to.
 	const sessionScoped = requestedSessionId != null;
@@ -1163,7 +1854,7 @@ export function renderStatusline({
 	const ctxLabelText = sessionLabel != null ? sessionLabel : "context";
 	// "Claude is fresh" = claudeSession is a real object but its
 	// context_window has no current_usage yet, i.e. claude hasn't completed
-	// its first API call. In that state, hit/tps pulled from the
+	// its first API call. In that state, hit/tps/ttft pulled from the
 	// most-recently-active store session are misleading — they almost
 	// certainly belong to a different claude (a long-lived clawback
 	// attached via probe-then-decide, see PLAN §30.5). Render the
@@ -1176,7 +1867,7 @@ export function renderStatusline({
 	const claudeIsFresh =
 		claudeAttached && claudeSession.context_window?.current_usage == null;
 	// Render the "waiting" placeholder for the per-session metric columns
-	// (hit/tps) when either: claude is provably pre-first-call
+	// (hit/tps/ttft) when either: claude is provably pre-first-call
 	// (claudeIsFresh), OR this is a scoped request for a session with no
 	// store entry yet. Both mean "no observations for THIS session" — reserve
 	// the column with `na`/0% rather than omitting it (no reflow) and, crucially,
@@ -1186,16 +1877,17 @@ export function renderStatusline({
 		claudeIsFresh || (sessionScoped && clawbackSession == null);
 
 	// Pull the threshold knobs from config once and bundle them so each
-	// formatter gets one options-bag entry instead of three. The `tps`
-	// pair is the *effective* one — resolveTpsThresholds derives it from
-	// the session ring when statuslineTpsCalibration is "relative", or
-	// passes the static config pair through when "absolute" (or when the
-	// ring is too short to calibrate).
+	// formatter gets one options-bag entry instead of three. The `tps` and
+	// `ttft` pairs are the *effective* ones — resolveTpsThresholds /
+	// resolveTtftThresholds derive them from the session ring when that
+	// metric's calibration is "relative", or pass the static config pair
+	// through when "absolute" (or when the ring is too short to calibrate).
 	const thresholds = {
 		pct: {
 			low: config.statuslinePctThresholdLow,
 			high: config.statuslinePctThresholdHigh,
 		},
+		ttft: resolveTtftThresholds(recentSession, config),
 		tps: resolveTpsThresholds(recentSession, config),
 	};
 
@@ -1208,7 +1900,7 @@ export function renderStatusline({
 	// sometimes chopped fields mid-glyph).
 	//
 	// Drop order (lowest priority leaves first):
-	//   brand (5) → week (10) → quota (20) → tps (40) → turn (60) →
+	//   week (10) → quota (20) → ttft (30) → tps (40) → turn (60) →
 	//   cache (70) → context (99 — never).
 	//
 	// Field order (render left-to-right) is independent of drop order:
@@ -1270,18 +1962,14 @@ export function renderStatusline({
 				}),
 		},
 		{
-			// Static marketing chip in the slot of the retired ttft field.
-			// Shown only when the line has live data behind it (a claude
-			// attached or a clawback session observed) — same visibility the
-			// ttft field had, so a proxy with nothing to report still renders
-			// the documented empty string, not a lone ad.
-			// Lowest drop priority: when the line overflows, the brand
-			// yields to every metric — an ad must never displace the
-			// operator's quota or cache numbers.
-			key: "brand",
-			priority: 5,
-			build: () =>
-				claudeAttached || recentSession != null ? STATUSLINE_BRAND : null,
+			key: "ttft",
+			priority: 30,
+			build: (color) =>
+				formatTtftField(recentSession, {
+					claudeIsFresh: metricsWaiting,
+					color,
+					thresholds,
+				}),
 		},
 	];
 
@@ -1328,11 +2016,6 @@ export function renderStatusline({
 // is effectively just the tps history window.
 const SPARK_LEN = 8;
 
-// The trailing marketing chip (operator-requested 2026-06-09). Static
-// text, deliberately identical to the product name in the README so the
-// statusline doubles as attribution when screenshotted.
-const STATUSLINE_BRAND = "clawback.md";
-
 // ANSI 8-color escape sequences. Operator-requested 2026-05-07: only the
 // bar's filled cells pick up color; labels, values, and waiting
 // placeholders (▒) stay terminal-default. 8-color is the most-compatible
@@ -1366,10 +2049,20 @@ function colorByPctLow(pct, { low, high } = { low: 50, high: 80 }) {
 	return ANSI_GREEN;
 }
 
-// TPS, higher = better (operator-confirmed 2026-05-07). Below `low` is
-// red (slow, bad), [low, high) is yellow, ≥high is green (fast, good),
-// applied per-cell on the tps sparkline so a speed trend reads as a
-// color gradient. The
+// TTFT (ms), lower = better. Below `low` is green (warm cache), [low,
+// high) is yellow, ≥high is red (cold cache or upstream slow). Used
+// per-cell on the ttft sparkline so a warming pattern visibly transitions
+// red → yellow → green left-to-right.
+function colorByTtft(ms, { low, high } = { low: 500, high: 2000 }) {
+	if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+	if (ms < low) return ANSI_GREEN;
+	if (ms < high) return ANSI_YELLOW;
+	return ANSI_RED;
+}
+
+// TPS, higher = better. Mirrors colorByTtft's mechanism but inverts the
+// direction (operator-confirmed 2026-05-07). Below `low` is red (slow,
+// bad), [low, high) is yellow, ≥high is green (fast, good). The
 // {low, high} pair is the *effective* one resolved by
 // resolveTpsThresholds — either static config values ("absolute") or
 // derived from the session ring ("relative", default).
@@ -1418,6 +2111,45 @@ function resolveTpsThresholds(session, config) {
 	return { low: peak / 6, high: peak / 2 };
 }
 
+// Minimum finite-and-positive ring samples before "relative" TTFT
+// calibration kicks in. Lower than the TPS gate: the recentTtftMs ring
+// is shorter (TTFT_RING_LEN=8) and every turn feeds it (no min-token
+// filter), so 3 turns is enough signal to leave the bootstrap window
+// quickly — which is the whole point, since the absolute fallback is the
+// wide band we're trying to escape.
+const TTFT_RELATIVE_MIN_SAMPLES = 3;
+
+function medianOf(values) {
+	const s = [...values].sort((a, b) => a - b);
+	const mid = Math.floor(s.length / 2);
+	return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+// TTFT analog of resolveTpsThresholds (lower = better). Returns the
+// static config pair when calibration is "absolute" or the ring is too
+// short. Otherwise derives low = median*1.5, high = median*3 from the
+// session's recentTtftMs ring: a turn within 1.5x the session's typical
+// first-token latency is green, 1.5-3x is yellow, >3x is red. Anchored on
+// the MEDIAN (not the min, the mirror of tps's peak) so one ultra-fast
+// cached request can't drag the green cutoff below the session's
+// realistic floor and paint every normal turn yellow.
+function resolveTtftThresholds(session, config) {
+	const absolute = {
+		low: config.statuslineTtftThresholdLowMs,
+		high: config.statuslineTtftThresholdHighMs,
+	};
+	if (config.statuslineTtftCalibration !== "relative") return absolute;
+	if (!session || typeof session !== "object" || Array.isArray(session)) {
+		return absolute;
+	}
+	const ring = Array.isArray(session.recentTtftMs) ? session.recentTtftMs : [];
+	const finite = ring.filter((v) => Number.isFinite(v) && v > 0);
+	if (finite.length < TTFT_RELATIVE_MIN_SAMPLES) return absolute;
+	const med = medianOf(finite);
+	if (!Number.isFinite(med) || med <= 0) return absolute;
+	return { low: med * 1.5, high: med * 3 };
+}
+
 /**
  * Resolve the runtime color setting to a boolean.
  *
@@ -1449,9 +2181,16 @@ export function resolveStatuslineColor({
 // Fixed-width column shapes for the numeric tail of each field. Operator-
 // requested 2026-05-07: as values populate ("0%" → "42%" → "100%", "1" →
 // "999"), the column boundaries should not shift. Right-align with leading
-// spaces so the field's right edge is stable.
+// spaces so the field's right edge is stable; ttft caps at 4 digits
+// (9999 ms) which covers the realistic Claude TTFT range — extreme cold-
+// cache turns occasionally exceed it and will jitter that one column.
 const PCT_WIDTH = 4; // "  0%" to "100%" or " na%"
 const TPS_WIDTH = 3; // "  0" to "999" or " na"
+// 5 chars covers up to 99999 ms (99 s). Production cold-cache TTFTs
+// occasionally exceed 9999 ms (10 s+) on first-turn cache misses, so the
+// extra column saves a one-time reflow when that lands. Operator-confirmed
+// 2026-05-07.
+const TTFT_WIDTH = 5; // "    0" to "99999" or "   na"
 
 function formatPctValue(pct) {
 	if (pct == null || !Number.isFinite(pct)) return "na%".padStart(PCT_WIDTH);
@@ -1461,6 +2200,12 @@ function formatPctValue(pct) {
 function formatTpsValue(value) {
 	if (value == null || !Number.isFinite(value)) return "na".padStart(TPS_WIDTH);
 	return String(Math.max(0, Math.round(value))).padStart(TPS_WIDTH);
+}
+
+function formatTtftValue(value) {
+	if (value == null || !Number.isFinite(value))
+		return "na".padStart(TTFT_WIDTH);
+	return String(Math.max(0, Math.round(value))).padStart(TTFT_WIDTH);
 }
 
 function formatCtxField(
@@ -1520,9 +2265,8 @@ function mostRecentSession(store) {
  * - `hit` returns 0 when fresh or when counters are all-zero, for
  *   the same reason (§32, option B).
  * - `tps`/`ttft` return null when fresh or the ring is empty — the
- *   chart skips the point (and the statusline's tps column shows its
- *   waiting placeholder; ttft is chart-only, the statusline doesn't
- *   render it).
+ *   statusline renders a waiting placeholder, the chart skips the
+ *   point.
  *
  * Caller can read the returned object directly into appendSample({...}).
  */
@@ -1781,11 +2525,11 @@ function formatRateLimitField(
  * filter that drops tool-call-only turns whose tps reading would be
  * meaningless), so a session can have ttft samples without any tps
  * samples — the operator should see a reserved column rather than the
- * field disappearing (operator-flagged 2026-05-07; preserves the
- * no-reflow guarantee).
+ * field disappearing (operator-flagged 2026-05-07; mirrors ttft's
+ * placeholder behaviour and preserves the no-reflow guarantee).
  *
  * When no session exists at all (plain-GET with empty store), return
- * null and omit the field.
+ * null and omit the field — same as ttft.
  */
 function formatTpsField(
 	session,
@@ -1801,7 +2545,8 @@ function formatTpsField(
 		return `tps ${"▒".repeat(SPARK_LEN)} ${formatTpsValue(null)}`;
 	}
 	const window = ring.slice(-SPARK_LEN);
-	// Color each cell by its absolute tps (higher = better, so a
+	// Color each cell by its absolute tps, mirroring ttft's per-cell
+	// approach but with the direction inverted (higher = better, so a
 	// trending-up sparkline reads as red → yellow → green). Operator-
 	// added 2026-05-07. Thresholds default by model class, configurable
 	// via statuslineTpsThresholdLow/High.
@@ -1810,9 +2555,49 @@ function formatTpsField(
 }
 
 /**
+ * Time-to-first-token for the most-recent turn (ms), with a sparkline
+ * of the previous SPARK_LEN turns. Driven by `session.recentTtftMs`
+ * ring buffer populated in server.js (the `ttftMs` returned from
+ * `proxyRequest`). The cleanest cache-warmth signal we have: warm
+ * cache shows ~100-500ms, cold ~1000-3000ms. Lower is better, which
+ * means a *falling* sparkline trend is good — opposite of the tps
+ * field.
+ *
+ * When there's no history yet (fresh boot, or session captured before
+ * we started recording the ring), we render a waiting placeholder
+ * `▒▒▒▒▒▒▒▒ na` — same shading as the day/week placeholders so the
+ * "no data yet" state is visually uniform across the line. Reserves
+ * the column so the sparkline doesn't snap in on the second turn
+ * (operator-flagged 2026-05-06).
+ */
+function formatTtftField(
+	session,
+	{ claudeIsFresh = false, color = false, thresholds = null } = {},
+) {
+	// Same gate as tps: when claude is provably pre-first-call, the
+	// ring contents belong to some other claude. Show " na" rather than
+	// a stranger's last-turn ttft.
+	if (claudeIsFresh) {
+		return `ttft ${"▒".repeat(SPARK_LEN)} ${formatTtftValue(null)}`;
+	}
+	if (!session) return null;
+	const ring = Array.isArray(session.recentTtftMs) ? session.recentTtftMs : [];
+	const latest = ring.length > 0 ? ring[ring.length - 1] : null;
+	if (!Number.isFinite(latest)) {
+		return `ttft ${"▒".repeat(SPARK_LEN)} ${formatTtftValue(null)}`;
+	}
+	const window = ring.slice(-SPARK_LEN);
+	// Color each cell by its absolute ms value, not the relative
+	// position in the window. A warming pattern (red ms → green ms)
+	// reads as a clear color gradient.
+	const colorFor = color ? (v) => colorByTtft(v, thresholds?.ttft) : null;
+	return `ttft ${sparklineFromValues(window, SPARK_LEN, { colorFor })} ${formatTtftValue(latest)}`;
+}
+
+/**
  * Robust scaling domain for a series, via Tukey fences
- * (Q1 - 1.5·IQR, Q3 + 1.5·IQR) clamped to the observed range. tps
- * series are dominated by occasional lone spikes (a
+ * (Q1 - 1.5·IQR, Q3 + 1.5·IQR) clamped to the observed range. tps/ttft
+ * series are dominated by occasional lone spikes (a cold-cache TTFT, a
  * near-zero-denominator tps); scaling to the raw min/max lets one such
  * spike collapse every other cell to the floor block. Fences instead
  * pin the domain to the bulk of the distribution so normal variation
@@ -1863,7 +2648,7 @@ function sparklineFromValues(
 	const span = max - min;
 	// `colorFor(value)` returns an ANSI escape (or null) keyed on the
 	// absolute value of each cell, NOT its relative position in the
-	// window. That lets the tps sparkline visualize a speed trend as
+	// window. That lets the ttft sparkline visualize cache-warming as
 	// an obvious color gradient (red → yellow → green) — independent of
 	// the cell-height encoding which scales relative to min/max.
 	const cells = window.map((v) => {
@@ -2584,25 +3369,17 @@ function parseBearer(authHeader) {
  *      to 127.0.0.1 — the browser connects to 127.0.0.1 (so
  *      localAddress=127.0.0.1) but still sends `Host: attacker.evil`.
  *      Comparing Host to localAddress catches this without an allowlist.
- *      Skipped when the request PRESENTS a valid admin bearer — not when
- *      one is merely configured. Remote operators legitimately dial in by
- *      hostname (`--remote homelab.local`, which never matches the
- *      interface address), and a cross-origin browser cannot attach a
- *      Bearer header without a CORS preflight this server never grants,
- *      so a presented token is rebinding-proof. A configured-but-absent
- *      token is NOT: loopback callers are token-exempt on writes, so
- *      skipping on configuration alone would hand a DNS-rebound page the
- *      loopback write surface with neither check applied. Reads on a
- *      token-configured proxy still skip — the read surface is
- *      documented open and hostname GETs (UI page, health) must keep
- *      working without a bearer.
+ *      Skipped when adminToken is set: the operator has opted into
+ *      auth-based security, the token gates writes (cross-origin browsers
+ *      can't add a Bearer header without preflight), and remote operators
+ *      legitimately need to dial in by hostname (`--remote homelab.local`).
  *
  *   3. Origin header (when present) must match the same allowlist. Same
- *      skip rationale as Host.
+ *      adminToken-skip rationale as Host.
  *
  * Returns null on success, or {status, body} to respond with on failure.
  */
-function assertOriginSafe(req, config, bearerOk = false) {
+function assertOriginSafe(req, config) {
 	// (1) Content-Type. Run first because it's the cheapest fail and
 	// applies regardless of auth posture.
 	if (isWriteMethod(req.method) && req.method !== "DELETE") {
@@ -2621,17 +3398,12 @@ function assertOriginSafe(req, config, bearerOk = false) {
 		}
 	}
 
-	// Auth-boundary skips. A request that PRESENTS the valid bearer is
-	// past the auth boundary regardless of method or source address —
-	// Host/Origin checks would only break `--remote homelab.local`
-	// callers (a hostname never matches the interface address), and a
-	// browser cannot be tricked into adding the header. With a token
-	// configured but NOT presented, only reads skip: the read surface is
-	// deliberately open and remote operators GET by hostname, but writes
-	// fall through to the Host/Origin checks below so a DNS-rebound page
-	// cannot ride the loopback token exemption into the write surface.
-	if (bearerOk) return null;
-	if (config?.adminToken && !isWriteMethod(req.method)) return null;
+	// Token-protected proxies use the bearer as their auth boundary;
+	// Host/Origin checks would just break `--remote homelab.local` setups
+	// without adding meaningful protection (cross-origin browsers can't
+	// add a Bearer header without preflight, and DNS-rebinding has no
+	// path to obtain the token).
+	if (config?.adminToken) return null;
 
 	const localAddr = normalizeAddr(req.socket?.localAddress);
 
@@ -2646,10 +3418,8 @@ function assertOriginSafe(req, config, bearerOk = false) {
 					error: "misdirected_request",
 					message:
 						"Host header does not match the listening interface " +
-						"(DNS rebinding suspected). Legitimate local callers send a " +
-						"Host matching the bind address; legitimate remote writers " +
-						"present the admin bearer (Authorization: Bearer <token>), " +
-						"which skips this check.",
+						"(DNS rebinding suspected). If you're a legitimate caller, " +
+						"send a Host header matching the bind address.",
 				},
 			};
 		}
@@ -2736,4 +3506,78 @@ function tokenMatches(provided, expected) {
 	const b = Buffer.from(expected, "utf8");
 	if (a.length !== b.length) return false;
 	return crypto.timingSafeEqual(a, b);
+}
+
+// PLAN §37: contract block for cache-aware session-file rewriters (Cozempic
+// et al.). Pure-function helper so the shape is unit-testable in isolation.
+// The contract is observation-only — clawback exposes the warm-prefix
+// high-water mark; the consumer does the file-mutation logic.
+function buildCozempicContract(config) {
+	const ttlMode = resolvedTtlMode(config);
+	const ttlMs = ttlMode === "1h" ? 60 * 60 * 1000 : 5 * 60 * 1000;
+	return {
+		version: 1,
+		ttlMode,
+		ttlMs,
+		warmUntilFormula:
+			"warmUntil ≈ lastObservedAt + ttlMs (upper bound; Anthropic does not " +
+			"report true expiry, and cache entries can be LRU-evicted earlier under " +
+			"pressure). Apply your own safety buffer before mutating.",
+		safePrefixSemantics:
+			"safePrefixAssistantMessageId is the msg_id of the most recent turn " +
+			"for which Anthropic returned non-zero cache tokens. Records at or " +
+			"before that message in the session JSONL are inside the warm prefix " +
+			"and MUST NOT be mutated while the cache may still be live. Records " +
+			"after that boundary are safe to rewrite (subject to your own " +
+			"semantic concerns).",
+		uncertaintyNote:
+			"PLAN §25 (ping → next-real-request hit stratum) is not yet measured. " +
+			"Keep-alive pings may or may not extend the warm window in practice; " +
+			"if you have hard guarantees you need, treat this contract as a " +
+			"best-effort hint rather than a deadline.",
+		stripPatterns: STRIP_PATTERNS.map((p) => p.name),
+		stripNote:
+			"PLAN §9: when stripEphemeralFromSystem is enabled (default-on), " +
+			"clawback applies these regex replacements to the request `system` " +
+			"block before forwarding — so the bytes Anthropic hashes for the " +
+			"prompt cache do NOT contain volatile per-request tokens (today's " +
+			"date, <env>, the rotating billing-cch). A consumer of this " +
+			"contract should keep its own session-file rewriting consistent " +
+			"with these patterns: if you regenerate any of this content, the " +
+			"new bytes need to survive the same strip pass for the cache key " +
+			"to remain stable.",
+		stripEphemeralEnabled: config?.stripEphemeralFromSystem !== false,
+	};
+}
+
+function trafficExplanation(turnLogConfigured) {
+	const base =
+		"Forwarded /v1/messages requests bucketed by classifier 'kind' (PLAN §21). " +
+		"'normal' is the default bucket — a large 'normal' share means we still have " +
+		"classifying work to do. Confidence is per-rule: 'exact' (URL/structure), " +
+		"'heuristic' (pattern), 'stub' (placeholder, currently never matches). " +
+		"Keep-alive pings appear as kind='keep-alive'.";
+	return turnLogConfigured
+		? base
+		: `${base} (No --turn-log configured; classification only lands in turn-log records, so this view is empty.)`;
+}
+
+function readTurnLogRecords(filePath) {
+	if (!filePath || !fs.existsSync(filePath)) return [];
+	let raw;
+	try {
+		raw = fs.readFileSync(filePath, "utf8");
+	} catch {
+		return [];
+	}
+	const out = [];
+	for (const line of raw.split("\n")) {
+		if (!line) continue;
+		try {
+			out.push(JSON.parse(line));
+		} catch {
+			/* skip malformed line */
+		}
+	}
+	return out;
 }

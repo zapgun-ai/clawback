@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Paired shadow-mode tee (turn-matched A/B).
+ * Paired shadow-mode tee (TEST.md "Fix A" — turn-matched A/B).
  *
  * Sits in front of TWO unmodified clawback instances and fans every real
  * Claude Code request to both, so each /v1/messages turn is billed under both

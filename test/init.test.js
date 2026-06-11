@@ -3,11 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { GLOBAL_CONFIG_SUBPATH } from "../src/config.js";
 import { parseFrontMatter } from "../src/front_matter.js";
-import {
-	ensureGitignored,
-	initConfig,
-	resolveInitTarget,
-} from "../src/init.js";
+import { initConfig, resolveInitTarget } from "../src/init.js";
 
 let cwd;
 let home;
@@ -225,46 +221,6 @@ test("local init outside a git repo does not touch .gitignore", () => {
 	expect(gitignore.action).toBe("skipped-no-repo");
 	expect(gitignore.added).toEqual([]);
 	expect(fs.existsSync(path.join(cwd, ".gitignore"))).toBe(false);
-});
-
-test("forceGitignore creates .gitignore even outside a git repo", () => {
-	// No .git/ here; force makes initConfig write .gitignore anyway. This is
-	// the `clawback quickstart` path.
-	const { gitignore } = initConfig({
-		cwd,
-		env: { HOME: home },
-		forceGitignore: true,
-	});
-	expect(gitignore.action).toBe("created");
-	expect(gitignore.added).toEqual(["CLAWBACK.md", "data/", "logs/"]);
-	const contents = fs.readFileSync(path.join(cwd, ".gitignore"), "utf8");
-	expect(contents).toMatch(/CLAWBACK\.md/);
-	expect(contents).toMatch(/data\//);
-});
-
-test("ensureGitignored({force}) bypasses the no-repo guard", () => {
-	const without = ensureGitignored(cwd);
-	expect(without.action).toBe("skipped-no-repo");
-	expect(fs.existsSync(path.join(cwd, ".gitignore"))).toBe(false);
-
-	const forced = ensureGitignored(cwd, { force: true });
-	expect(forced.action).toBe("created");
-	expect(forced.added).toEqual(["CLAWBACK.md", "data/", "logs/"]);
-	expect(fs.existsSync(path.join(cwd, ".gitignore"))).toBe(true);
-});
-
-test("forceGitignore appends managed entries to an existing .gitignore", () => {
-	fs.writeFileSync(path.join(cwd, ".gitignore"), "node_modules/\n", "utf8");
-	const { gitignore } = initConfig({
-		cwd,
-		env: { HOME: home },
-		forceGitignore: true,
-	});
-	expect(gitignore.action).toBe("added");
-	expect(gitignore.added).toEqual(["CLAWBACK.md", "data/", "logs/"]);
-	const contents = fs.readFileSync(path.join(cwd, ".gitignore"), "utf8");
-	expect(contents).toMatch(/node_modules\//);
-	expect(contents).toMatch(/CLAWBACK\.md/);
 });
 
 test("global init never touches cwd .gitignore", () => {

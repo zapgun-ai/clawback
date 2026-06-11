@@ -89,7 +89,7 @@ describe("renderStatusline (pure)", () => {
 
 	test("progressive truncation drops low-priority fields whole, not mid-glyph", () => {
 		// At an intermediate cap the renderer should drop fields by priority
-		// (brand → week → quota → tps → turn → cache — context never) rather than
+		// (week → quota → ttft → tps → turn → cache → context-only) rather than
 		// character-slicing. With this fixture the full line runs ~100+
 		// chars; capping at 60 should leave context + at least one or two
 		// higher-priority fields, with no trailing ellipsis.
@@ -129,8 +129,7 @@ describe("renderStatusline (pure)", () => {
 		expect(text.length).toBeLessThanOrEqual(60);
 		expect(text.endsWith("…")).toBe(false);
 		expect(text).toMatch(/context/);
-		// brand drops first, then `week` — neither should survive at 60.
-		expect(text).not.toMatch(/clawback\.md/);
+		// `week` is the first to drop — should not survive at 60.
 		expect(text).not.toMatch(/\bweek\b/);
 	});
 
@@ -201,13 +200,13 @@ describe("renderStatusline (pure)", () => {
 	test("renders fixed-width placeholders for every claude-driven field when nothing has loaded yet", () => {
 		// Operator-flagged 2026-05-07. A fresh `clawback claude` (no
 		// turns yet) used to produce a half-rendered line: context/turn
-		// vanished and tps surfaced a stale unrelated session's
+		// vanished and tps/ttft surfaced a stale unrelated session's
 		// numbers. Now every field reserves a fixed-width column —
 		// context defaults to a real 0% (since a fresh window genuinely
 		// starts near zero), quota/week/turn render ` na%` waiting
-		// placeholders, tps renders ` na`. The numeric tail is
-		// right-padded so the line doesn't reflow once values populate.
-		// The static brand chip trails the metrics.
+		// placeholders, tps/ttft render ` na`/`  na`. The numeric tail
+		// is right-padded so the line doesn't reflow once values
+		// populate.
 		const text = renderStatusline({
 			config: baseCfg,
 			store: fakeStore,
@@ -217,7 +216,7 @@ describe("renderStatusline (pure)", () => {
 			},
 		});
 		expect(text).toBe(
-			"context ░░░░░░░░   0% · quota ▒▒▒▒▒▒▒▒  na% · week ▒▒▒▒▒▒▒▒  na% · cache ░░░░░░░░   0% · turn ▒▒▒▒▒▒▒▒  na% · tps ▒▒▒▒▒▒▒▒  na · clawback.md",
+			"context ░░░░░░░░   0% · quota ▒▒▒▒▒▒▒▒  na% · week ▒▒▒▒▒▒▒▒  na% · cache ░░░░░░░░   0% · turn ▒▒▒▒▒▒▒▒  na% · tps ▒▒▒▒▒▒▒▒  na · ttft ▒▒▒▒▒▒▒▒    na",
 		);
 	});
 
@@ -457,9 +456,10 @@ describe("renderStatusline (pure)", () => {
 			},
 		});
 		// Layout: label SPACE graphic SPACE value%. All five percentage
-		// fields are progress bars (8 cells by default). The brand chip
-		// trails the line; we don't anchor with $ so this test stays
-		// focused on the percentage fields' shape and order.
+		// fields are progress bars (8 cells by default). ttft will append
+		// its waiting placeholder (no recentTtftMs in this fixture); we
+		// don't anchor with $ so this test stays focused on the percentage
+		// fields' shape and order.
 		// All percentages are right-padded to PCT_WIDTH (4 chars), so the
 		// rendered tail after each bar is "1 separator + N-pad-spaces +
 		// digits + %". 22%/10%/60%/80%/90% are all 3-char strings padded
@@ -644,18 +644,18 @@ describe("renderStatusline (pure)", () => {
 			store: fakeStoreTps,
 		});
 		// Layout: label SPACE sparkline SPACE value (latest tps, right-padded
-		// to TPS_WIDTH=3 chars: " 42"). The brand chip may follow — anchor
+		// to TPS_WIDTH=3 chars: " 42"). ttft placeholder may follow — anchor
 		// on tps's value, not end-of-string.
 		expect(text).toMatch(/tps [▁-█]+\s+42(?: ·|$)/);
 	});
 
-	test("tps field shows a waiting placeholder when ring is empty (matches quota/week pattern)", () => {
+	test("tps field shows a waiting placeholder when ring is empty (matches ttft pattern)", () => {
 		// Operator-flagged 2026-05-07: tps was being omitted entirely when
 		// the ring was empty (e.g. only tool-call turns recorded — those
 		// fail the TPS_MIN_OUTPUT_TOKENS gate in server.js so don't feed
-		// recentTps). Reserve the column with `▒▒▒▒▒▒▒▒ na` (the quota/week
-		// placeholder shape) so the line doesn't reflow once a real tps
-		// sample lands.
+		// recentTps, while every turn still feeds recentTtftMs). Reserve
+		// the column with `▒▒▒▒▒▒▒▒ na` like ttft does so the line
+		// doesn't reflow once a real tps sample lands.
 		const fakeStoreNoTps = {
 			keys: () => ["k"],
 			all: () => [
@@ -673,14 +673,12 @@ describe("renderStatusline (pure)", () => {
 		expect(text).toMatch(/tps ▒▒▒▒▒▒▒▒\s+na(?: ·|$)/);
 	});
 
-	test("tps shows placeholder even when the ttft ring is populated (operator-flagged regression 2026-05-07)", () => {
+	test("tps shows placeholder while ttft shows real data (operator-flagged regression 2026-05-07)", () => {
 		// The exact state the operator observed: a non-fresh claude with
 		// ttft samples in the ring (every turn feeds it) but no tps
 		// samples (only tool-call turns so far → all gated out by
 		// TPS_MIN_OUTPUT_TOKENS). Pre-fix, tps disappeared from the line
-		// entirely instead of reserving its column. The ttft ring itself
-		// is capture-only now (web UI chart + extractMetricsSample) — its
-		// samples must not surface anywhere on the line.
+		// while ttft rendered with real numbers — surprising asymmetry.
 		const fakeStoreTtftOnly = {
 			keys: () => ["k"],
 			all: () => [
@@ -703,15 +701,10 @@ describe("renderStatusline (pure)", () => {
 			claudeSession,
 		});
 		expect(text).toMatch(/tps ▒▒▒▒▒▒▒▒\s+na/);
-		expect(text).not.toContain("1765");
-		expect(text).toMatch(/clawback\.md/);
+		expect(text).toMatch(/ttft [▁-█]+\s+1765/);
 	});
 
-	test("brand chip renders as bare static text — no sparkline, no value", () => {
-		// The slot that used to render `ttft <sparkline> <ms>` now carries
-		// the marketing chip (operator-requested 2026-06-09). Even with a
-		// fully populated recentTtftMs ring, nothing numeric may follow the
-		// brand: TTFT stays capture-only (web UI chart + extractMetricsSample).
+	test("ttft field appears once recentTtftMs ring is populated", () => {
 		const fakeStoreTtft = {
 			keys: () => ["k"],
 			all: () => [
@@ -726,92 +719,43 @@ describe("renderStatusline (pure)", () => {
 			config: { ...baseCfg, statuslineMaxChars: 200 },
 			store: fakeStoreTtft,
 		});
-		// Bare token: a separator or line edge on each side, no glyph/value tail.
-		expect(text).toMatch(/(?:^|· )clawback\.md(?: ·|$)/);
-		expect(text).not.toMatch(/clawback\.md [▁-█▒]/);
-		expect(text).not.toContain("110");
+		// Layout: label SPACE sparkline SPACE value (latest ttft, right-padded
+		// to TTFT_WIDTH=4 chars: " 110"). Allow trailing idle/separator now
+		// that the line has more fields after ttft.
+		expect(text).toMatch(/ttft [▁-█]+\s+110(\s|$|\s·)/);
 	});
 
-	test("brand chip renders last on the line", () => {
-		// Marketing trails the metrics — it must never lead or interleave.
-		const fakeStoreFull = {
+	test("ttft field shows a waiting placeholder when ring is empty (matches quota/week pattern)", () => {
+		// No history yet (fresh boot or pre-ring-introduction session). We
+		// reserve the column with `▒▒▒▒▒▒▒▒ na` so the sparkline doesn't
+		// snap in on the second turn — same shading as the quota/week
+		// placeholders for visual uniformity.
+		const fakeStoreNoTtft = {
 			keys: () => ["k"],
 			all: () => [
 				{
 					key: "k",
 					lastActivity: "2026-05-06T10:00:00Z",
-					cacheReadTokens: 80,
-					cacheCreationTokens: 10,
-					cacheMissTokens: 10,
-					recentTps: [40, 50, 60],
+					// no recentTtftMs field — pre-first-turn or older state record
 				},
 			],
 		};
 		const text = renderStatusline({
 			config: { ...baseCfg, statuslineMaxChars: 200 },
-			store: fakeStoreFull,
+			store: fakeStoreNoTtft,
 		});
-		expect(text.endsWith("clawback.md")).toBe(true);
+		expect(text).toMatch(/ttft ▒▒▒▒▒▒▒▒\s+na(\s|$|\s·)/);
 	});
 
-	test("brand chip is suppressed when there is nothing else to report", () => {
-		// No claude attached, no clawback session: the line must stay the
-		// documented empty string — a lone ad with zero metrics behind it
-		// would read as a malfunction (mirrors the old ttft field's
-		// no-session suppression).
+	test("ttft is suppressed entirely when no clawback session exists", () => {
+		// No session = no clawback observation; reserving a column for an
+		// unobserved field is just noise (mirrors quota/week's no-claudeSession
+		// suppression).
 		const text = renderStatusline({
 			config: { ...baseCfg, statuslineMaxChars: 200 },
 			store: fakeStore,
 		});
-		expect(text).not.toMatch(/clawback\.md/);
-		expect(text).toBe("");
-	});
-
-	test("brand chip is the first field dropped on overflow", () => {
-		// Drop priority 5 — below every metric. When the line is one char
-		// over budget, the ad goes before any operator data does.
-		const fakeStoreFull = {
-			keys: () => ["k"],
-			all: () => [
-				{
-					key: "k",
-					lastActivity: "2026-05-06T10:00:00Z",
-					cacheReadTokens: 80,
-					cacheCreationTokens: 10,
-					cacheMissTokens: 10,
-					recentTps: [40, 50, 60],
-				},
-			],
-		};
-		const claudeSession = {
-			context_window: {
-				used_percentage: 42,
-				current_usage: {
-					input_tokens: 50,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 950,
-				},
-			},
-			rate_limits: {
-				five_hour: { used_percentage: 30 },
-				seven_day: { used_percentage: 20 },
-			},
-		};
-		const full = renderStatusline({
-			config: { ...baseCfg, statuslineMaxChars: 400 },
-			store: fakeStoreFull,
-			claudeSession,
-		});
-		expect(full.endsWith("clawback.md")).toBe(true);
-		// One char tighter than the full line: brand drops, week (the next
-		// candidate) survives.
-		const squeezed = renderStatusline({
-			config: { ...baseCfg, statuslineMaxChars: full.length - 1 },
-			store: fakeStoreFull,
-			claudeSession,
-		});
-		expect(squeezed).not.toMatch(/clawback\.md/);
-		expect(squeezed).toMatch(/\bweek\b/);
+		expect(text).not.toMatch(/\bttft\b/);
 	});
 
 	test("numeric tail is fixed-width across all populated values (no reflow as values change)", () => {
@@ -819,7 +763,7 @@ describe("renderStatusline (pure)", () => {
 		// must stay stable as values populate. This test asserts that the
 		// rendered length of each field is identical at 0%, 42%, and 100%
 		// (and the ` na%` placeholder), so subsequent fields don't shift.
-		// Same property for tps (0/42/999/na).
+		// Same property for tps (0/42/999/na) and ttft (0/110/9999/na).
 		const cfg = { ...baseCfg, statuslineMaxChars: 200 };
 		const measure = (text) => text.length;
 
@@ -851,6 +795,22 @@ describe("renderStatusline (pure)", () => {
 			return measure(renderStatusline({ config: cfg, store }));
 		});
 		expect(new Set(tpsSamples).size).toBe(1);
+
+		// ttft: TTFT_WIDTH=4. Same pattern.
+		const ttftSamples = [0, 110, 9999].map((v) => {
+			const store = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-06T10:00:00Z",
+						recentTtftMs: [v],
+					},
+				],
+			};
+			return measure(renderStatusline({ config: cfg, store }));
+		});
+		expect(new Set(ttftSamples).size).toBe(1);
 	});
 
 	describe("ANSI color (operator-requested 2026-05-07)", () => {
@@ -879,6 +839,7 @@ describe("renderStatusline (pure)", () => {
 						cacheCreationTokens: 10,
 						cacheMissTokens: 10,
 						recentTps: [40, 50, 60, 70],
+						recentTtftMs: [200, 250, 300, 350],
 					},
 				],
 			};
@@ -969,9 +930,48 @@ describe("renderStatusline (pure)", () => {
 			expect(highText).toContain(`cache ${ANSI_GREEN}█`);
 		});
 
-		test("tps sparkline colors each cell by its own value (higher = greener)", () => {
-			// Operator-added 2026-05-07: per-cell coloring, higher tps =
-			// green, lower tps = red. Thresholds are pinned (absolute mode,
+		test("ttft sparkline colors each cell by its absolute ms, not its relative position", () => {
+			// Cache-warming pattern: high (red) → mid (yellow) → low (green).
+			// Each cell should pick up the color matching its own value, so
+			// the sparkline visibly transitions left-to-right.
+			// Thresholds AND calibration are pinned in-test so the test stays
+			// independent of the default band tuning. Calibration is forced to
+			// "absolute" because "relative" is now the default — without this
+			// pin the ring (≥3 samples) would drive the bands instead of the
+			// 500/2000 pair below.
+			const fakeStoreWarming = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-06T10:00:00Z",
+						recentTtftMs: [3000, 1000, 200], // red, yellow, green @ 500/2000
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineMaxChars: 200,
+					statuslineTtftCalibration: "absolute",
+					statuslineTtftThresholdLowMs: 500,
+					statuslineTtftThresholdHighMs: 2000,
+				},
+				store: fakeStoreWarming,
+				colorEnabled: true,
+			});
+			// All three colors should appear in the ttft section.
+			const ttft = text.slice(text.indexOf("ttft"));
+			expect(ttft).toContain(ANSI_RED);
+			expect(ttft).toContain(ANSI_YELLOW);
+			expect(ttft).toContain(ANSI_GREEN);
+		});
+
+		test("tps sparkline colors each cell with the inverse of ttft's direction (higher = greener)", () => {
+			// Operator-added 2026-05-07: tps gets the same per-cell
+			// coloring shape as ttft, but the direction inverts (higher
+			// tps = green, lower tps = red — the opposite of ttft's
+			// lower-ms = green). Thresholds are pinned (absolute mode,
 			// low=30, high=80) so the test stays independent of the default
 			// band tuning: 10 → red, 50 → yellow, 100 → green. All three
 			// should appear in the tps section.
@@ -1017,15 +1017,19 @@ describe("renderStatusline (pure)", () => {
 			return sep === -1 ? text.slice(start) : text.slice(start, sep);
 		};
 
-		test("tps color direction is higher-is-better (high tps green, low tps red)", () => {
-			// 100 tps reads green (fast), 10 tps reads red (slow) under the
-			// same pinned bands — the inverse of the high-bad ramp used by
-			// context/quota/week. Thresholds are pinned in-test (absolute via
-			// short ring fallback) so the test stays independent of the
-			// default band tuning.
+		test("tps direction is inverted vs ttft at the same numeric value", () => {
+			// At 100 tps and 100ms, both fields read as "good": tps is
+			// green because higher = better, ttft is green because lower
+			// = better. At 10 tps / 3000ms, both should be red. This
+			// pins down that the directions are genuinely opposite — same
+			// numeric values would map to different colors per field.
+			// Thresholds are pinned in-test so the test stays independent
+			// of the default band tuning.
 			const fixedThresholds = {
 				statuslineTpsThresholdLow: 30,
 				statuslineTpsThresholdHigh: 80,
+				statuslineTtftThresholdLowMs: 500,
+				statuslineTtftThresholdHighMs: 2000,
 			};
 			const fakeStoreFast = {
 				keys: () => ["k"],
@@ -1034,6 +1038,7 @@ describe("renderStatusline (pure)", () => {
 						key: "k",
 						lastActivity: "2026-05-06T10:00:00Z",
 						recentTps: [100],
+						recentTtftMs: [100],
 					},
 				],
 			};
@@ -1043,6 +1048,7 @@ describe("renderStatusline (pure)", () => {
 				colorEnabled: true,
 			});
 			expect(fieldSlice(fastText, "tps")).toContain(ANSI_GREEN);
+			expect(fieldSlice(fastText, "ttft")).toContain(ANSI_GREEN);
 
 			const fakeStoreSlow = {
 				keys: () => ["k"],
@@ -1051,6 +1057,7 @@ describe("renderStatusline (pure)", () => {
 						key: "k",
 						lastActivity: "2026-05-06T10:00:00Z",
 						recentTps: [10],
+						recentTtftMs: [3000],
 					},
 				],
 			};
@@ -1060,35 +1067,7 @@ describe("renderStatusline (pure)", () => {
 				colorEnabled: true,
 			});
 			expect(fieldSlice(slowText, "tps")).toContain(ANSI_RED);
-		});
-
-		test("brand chip is never colored", () => {
-			// The ad is not a metric: no thresholds apply, and coloring it
-			// would lend it false signal. It must carry zero ANSI even when
-			// real fields around it are colored.
-			const fakeStoreFull = {
-				keys: () => ["k"],
-				all: () => [
-					{
-						key: "k",
-						lastActivity: "2026-05-06T10:00:00Z",
-						cacheReadTokens: 80,
-						cacheCreationTokens: 10,
-						cacheMissTokens: 10,
-						recentTps: [40, 50, 60, 70],
-					},
-				],
-			};
-			const text = renderStatusline({
-				config: { ...baseCfg, statuslineMaxChars: 200 },
-				store: fakeStoreFull,
-				colorEnabled: true,
-			});
-			// The line as a whole is colored (hit bar at least)…
-			expect(visibleLength(text)).toBeLessThan(text.length);
-			// …but the brand tail (last field) is the bare token: any ANSI
-			// inside it would surface here as extra characters.
-			expect(text.slice(text.indexOf("clawback.md"))).toBe("clawback.md");
+			expect(fieldSlice(slowText, "ttft")).toContain(ANSI_RED);
 		});
 
 		test("relative calibration derives tps bands from the session ring peak (peak/6, peak/2)", () => {
@@ -1226,8 +1205,236 @@ describe("renderStatusline (pure)", () => {
 			expect(tps).not.toContain(ANSI_RED);
 		});
 
+		test("ttft RELATIVE calibration (opt-in) keeps a steady session green even above the absolute budget", () => {
+			// Relative ttft (opt-in via statuslineTtftCalibration:"relative")
+			// anchors the bands to the session's own median, so a session that
+			// is steady-but-not-wall-clock-fast reads green: "normal for THIS
+			// link." Ring ~3500ms: median=3600 → low=5400, so every cell
+			// (≤3800) is green. Crucially these turns are ABOVE the absolute
+			// green cutoff (3000ms) — under the default (absolute) the same ring
+			// reads yellow (see the masking-guard test below), which is the
+			// whole reason relative is no longer the default. Pins relative
+			// explicitly because absolute is now the default.
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTtftMs: [3400, 3500, 3600, 3700, 3800],
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineTtftCalibration: "relative",
+					statuslineMaxChars: 200,
+				},
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const ttft = fieldSlice(text, "ttft");
+			expect(ttft).toContain(ANSI_GREEN);
+			expect(ttft).not.toContain(ANSI_YELLOW);
+			expect(ttft).not.toContain(ANSI_RED);
+		});
+
+		test("DEFAULT (absolute) ttft does NOT mask a consistently-cold cache (2026-06-02)", () => {
+			// Why the default flipped relative→absolute: a session whose cache
+			// is *consistently* cold has a high median, so relative calibration
+			// paints it all-GREEN ("slow is normal for me") — hiding the exact
+			// state clawback exists to fix. The same ~3500ms steady-cold ring
+			// must read YELLOW under the default (absolute band 3000/5000), not
+			// green. This is the inverse of the relative test above and locks in
+			// the operator's 2026-06-02 decision: green must mean a genuinely
+			// warm cache, not "typical for this session."
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTtftMs: [3400, 3500, 3600, 3700, 3800],
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: { ...baseCfg, statuslineMaxChars: 200 },
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const ttft = fieldSlice(text, "ttft");
+			expect(ttft).toContain(ANSI_YELLOW); // 3000 ≤ every cell < 5000
+			expect(ttft).not.toContain(ANSI_GREEN); // nothing below the 3000 warm cutoff
+		});
+
+		test("ttft relative calibration is NOT fooled by one ultra-fast cached request (median, not min)", () => {
+			// Design note for the relative ttft bands (opt-in; pinned here
+			// because absolute is now the default): we anchor on the MEDIAN, not
+			// the min (the mirror of tps's peak). A single tiny cached request
+			// can produce one outlier-fast first token (e.g. 150ms); min-
+			// anchoring would set low=150*1.5=225 and paint every normal ~1.4s
+			// turn red. Median-anchoring ignores the outlier. Ring: [150
+			// (outlier), 1300, 1400, 1350, 1450] → median=1350 → low=2025,
+			// high=4050. Every realistic cell (≤1450) stays green; only the
+			// outlier-driven RED that min-anchoring would cause is what we're
+			// guarding against here.
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTtftMs: [150, 1300, 1400, 1350, 1450],
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineTtftCalibration: "relative",
+					statuslineMaxChars: 200,
+				},
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const ttft = fieldSlice(text, "ttft");
+			expect(ttft).toContain(ANSI_GREEN);
+			expect(ttft).not.toContain(ANSI_RED);
+		});
+
+		test("DEFAULT tps absolute fallback reads green for an Opus-range turn (rescale 2026-06-01)", () => {
+			// Operator complaint 2026-06-01: "tps is red too often, make green
+			// easier to hit." The bootstrap window (before the relative ring
+			// has TPS_RELATIVE_MIN_SAMPLES) uses the absolute fallback pair.
+			// We rescaled that default from 25/100 to 15/40 so a typical Opus
+			// decode (~30-60 tps) reads green instead of yellow during bootstrap.
+			// This pins the DEFAULT band (no per-test override): a single 50-tps
+			// sample (<4 → absolute fallback) must be green. Reverting the
+			// default to 100 would flip this back to yellow and trip the test.
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTps: [50], // 1 sample → absolute fallback (default 15/40)
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: { ...baseCfg, statuslineMaxChars: 200 },
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const tps = fieldSlice(text, "tps");
+			expect(tps).toContain(ANSI_GREEN); // 50 ≥ 40
+			expect(tps).not.toContain(ANSI_YELLOW); // was yellow under old 25/100
+			expect(tps).not.toContain(ANSI_RED);
+		});
+
+		test("ttft RELATIVE calibration (opt-in) keeps a steady session green even above the absolute budget", () => {
+			// Relative ttft (opt-in via statuslineTtftCalibration:"relative")
+			// anchors the bands to the session's own median, so a session that
+			// is steady-but-not-wall-clock-fast reads green: "normal for THIS
+			// link." Ring ~3500ms: median=3600 → low=5400, so every cell
+			// (≤3800) is green. Crucially these turns are ABOVE the absolute
+			// green cutoff (3000ms) — under the default (absolute) the same ring
+			// reads yellow (see the masking-guard test below), which is the
+			// whole reason relative is no longer the default. Pins relative
+			// explicitly because absolute is now the default.
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTtftMs: [3400, 3500, 3600, 3700, 3800],
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineTtftCalibration: "relative",
+					statuslineMaxChars: 200,
+				},
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const ttft = fieldSlice(text, "ttft");
+			expect(ttft).toContain(ANSI_GREEN);
+			expect(ttft).not.toContain(ANSI_YELLOW);
+			expect(ttft).not.toContain(ANSI_RED);
+		});
+
+		test("DEFAULT (absolute) ttft does NOT mask a consistently-cold cache (2026-06-02)", () => {
+			// Why the default flipped relative→absolute: a session whose cache
+			// is *consistently* cold has a high median, so relative calibration
+			// paints it all-GREEN ("slow is normal for me") — hiding the exact
+			// state clawback exists to fix. The same ~3500ms steady-cold ring
+			// must read YELLOW under the default (absolute band 3000/5000), not
+			// green. This is the inverse of the relative test above and locks in
+			// the operator's 2026-06-02 decision: green must mean a genuinely
+			// warm cache, not "typical for this session."
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTtftMs: [3400, 3500, 3600, 3700, 3800],
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: { ...baseCfg, statuslineMaxChars: 200 },
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const ttft = fieldSlice(text, "ttft");
+			expect(ttft).toContain(ANSI_YELLOW); // 3000 ≤ every cell < 5000
+			expect(ttft).not.toContain(ANSI_GREEN); // nothing below the 3000 warm cutoff
+		});
+
+		test("ttft relative calibration is NOT fooled by one ultra-fast cached request (median, not min)", () => {
+			// Design note for the relative ttft bands (opt-in; pinned here
+			// because absolute is now the default): we anchor on the MEDIAN, not
+			// the min (the mirror of tps's peak). A single tiny cached request
+			// can produce one outlier-fast first token (e.g. 150ms); min-
+			// anchoring would set low=150*1.5=225 and paint every normal ~1.4s
+			// turn red. Median-anchoring ignores the outlier. Ring: [150
+			// (outlier), 1300, 1400, 1350, 1450] → median=1350 → low=2025,
+			// high=4050. Every realistic cell (≤1450) stays green; only the
+			// outlier-driven RED that min-anchoring would cause is what we're
+			// guarding against here.
+			const fakeStore = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-26T10:00:00Z",
+						recentTtftMs: [150, 1300, 1400, 1350, 1450],
+					},
+				],
+			};
+			const text = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineTtftCalibration: "relative",
+					statuslineMaxChars: 200,
+				},
+				store: fakeStore,
+				colorEnabled: true,
+			});
+			const ttft = fieldSlice(text, "ttft");
+			expect(ttft).toContain(ANSI_GREEN);
+			expect(ttft).not.toContain(ANSI_RED);
+		});
+
 		test("waiting placeholder bar (▒) is never colored", () => {
-			// Day/week/turn placeholder + tps `na` placeholder all use
+			// Day/week/turn placeholder + tps/ttft `na` placeholder all use
 			// the medium-shade ▒ which intentionally stays terminal-default
 			// (the placeholder shape is ALREADY a "no data" signal — color
 			// would muddy that). On a fresh-claude render, every store-fed
@@ -1318,6 +1525,53 @@ describe("renderStatusline (pure)", () => {
 			expect(tight).toContain(`context ${ANSI_RED}█`);
 		});
 
+		test("ttft threshold knobs shift the color bands", () => {
+			const fakeStoreTtft = {
+				keys: () => ["k"],
+				all: () => [
+					{
+						key: "k",
+						lastActivity: "2026-05-06T10:00:00Z",
+						recentTtftMs: [800],
+					},
+				],
+			};
+
+			// Default thresholds (3000/5000): 800ms → green (under "warm").
+			const def = renderStatusline({
+				config: { ...baseCfg, statuslineMaxChars: 200 },
+				store: fakeStoreTtft,
+				colorEnabled: true,
+			});
+			expect(fieldSlice(def, "ttft")).toContain(ANSI_GREEN);
+
+			// Tight thresholds (100/200): 800ms → red.
+			const tight = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineMaxChars: 200,
+					statuslineTtftThresholdLowMs: 100,
+					statuslineTtftThresholdHighMs: 200,
+				},
+				store: fakeStoreTtft,
+				colorEnabled: true,
+			});
+			expect(fieldSlice(tight, "ttft")).toContain(ANSI_RED);
+
+			// Lax thresholds (1000/5000): 800ms → green.
+			const lax = renderStatusline({
+				config: {
+					...baseCfg,
+					statuslineMaxChars: 200,
+					statuslineTtftThresholdLowMs: 1000,
+					statuslineTtftThresholdHighMs: 5000,
+				},
+				store: fakeStoreTtft,
+				colorEnabled: true,
+			});
+			expect(fieldSlice(lax, "ttft")).toContain(ANSI_GREEN);
+		});
+
 		test("tps threshold knobs shift the color bands (Haiku-friendly preset)", () => {
 			// At 150 tps with default thresholds (30/80), result is green.
 			// Bumping thresholds to (200/400) — closer to a Haiku-tuned
@@ -1366,7 +1620,7 @@ describe("renderStatusline (pure)", () => {
 						cacheReadTokens: 80,
 						cacheCreationTokens: 10,
 						cacheMissTokens: 10,
-						recentTps: [200, 1000, 3000],
+						recentTtftMs: [200, 1000, 3000],
 					},
 				],
 			};
@@ -1461,12 +1715,12 @@ describe("renderStatusline (pure)", () => {
 		});
 	});
 
-	test("fresh claude attached to a busy clawback shows na for tps, not a stranger's numbers", () => {
+	test("fresh claude attached to a busy clawback shows na for tps/ttft, not a stranger's numbers", () => {
 		// Regression for operator-flagged 2026-05-07: `clawback claude` in
 		// a new directory probe-attached to a long-lived clawback. Because
 		// the store already had another claude's session with a populated
-		// recentTps ring, the statusline rendered numeric tps even though
-		// THIS claude hadn't made a single API call.
+		// recentTps/recentTtftMs ring, the statusline rendered numeric tps
+		// and ttft even though THIS claude hadn't made a single API call.
 		// Gate: when claudeSession.context_window.current_usage is null
 		// (claude is provably pre-first-call), the per-session figures
 		// from the most-recent store session are suppressed.
@@ -1493,6 +1747,7 @@ describe("renderStatusline (pure)", () => {
 			},
 		});
 		expect(text).toMatch(/tps ▒{8}\s+na/);
+		expect(text).toMatch(/ttft ▒{8}\s+na/);
 		// context defaults to a real 0% (with empty track) per operator
 		// preference 2026-05-07; turn shows the placeholder bar + na%.
 		expect(text).toMatch(/context ░{8}\s+0%/);
@@ -1503,7 +1758,32 @@ describe("renderStatusline (pure)", () => {
 		expect(text).toMatch(/cache ░{8}\s+0%/);
 		// Specifically: the stale ring values (1 and 769) must not appear.
 		expect(text).not.toMatch(/tps [▁-█]+\s+1\b/);
-		expect(text).not.toContain("769");
+		expect(text).not.toMatch(/ttft [▁-█]+\s+769\b/);
+	});
+
+	test("ttft sparkline scales to its own min/max so cache-warming trends are visible", () => {
+		// Cache warming pattern: TTFT drops over consecutive turns. The
+		// sparkline should show that descent (most-recent value at the
+		// right; not all-same-block).
+		const fakeStoreWarming = {
+			keys: () => ["k"],
+			all: () => [
+				{
+					key: "k",
+					lastActivity: "2026-05-06T10:00:00Z",
+					recentTtftMs: [1200, 800, 500, 300, 220, 170, 140, 110],
+				},
+			],
+		};
+		const text = renderStatusline({
+			config: { ...baseCfg, statuslineMaxChars: 200 },
+			store: fakeStoreWarming,
+		});
+		const m = text.match(/ttft ([▁-█]+)\s+\d+/);
+		expect(m).not.toBeNull();
+		const spark = m[1];
+		const distinct = new Set(spark.split(""));
+		expect(distinct.size).toBeGreaterThanOrEqual(2);
 	});
 
 	test("tps sparkline scales to its own min/max so trends are visible", () => {
@@ -1964,11 +2244,11 @@ describe("/_proxy/statusline admin endpoint", () => {
 
 describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-02)", () => {
 	// A scoped /_proxy/statusline/<id> request must render THAT session's own
-	// hit/tps. Before the fix, a request for a session with no store
+	// hit/tps/ttft. Before the fix, a request for a session with no store
 	// entry (claude launched but no /v1/messages forwarded yet) fell back to
 	// mostRecentSession and borrowed a *sibling* session's numbers, so every
 	// idle session's statusline showed the one active session's metrics —
-	// "same across sessions" (operator-flagged).
+	// "identical across sessions; ttft always green" (operator-flagged).
 	const cfg = { ...DEFAULTS, statuslineColor: "off" };
 	const attachedClaude = {
 		context_window: {
@@ -1988,6 +2268,7 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 		cacheCreationTokens: 50,
 		cacheMissTokens: 50,
 		recentTps: [144, 144, 144, 144],
+		recentTtftMs: [1234, 1234, 1234, 1234],
 	};
 	const storeWithAAA = {
 		keys: () => ["AAA"],
@@ -1995,7 +2276,7 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 		get: (k) => (k === "AAA" ? sessionAAA : undefined),
 	};
 
-	test("a scoped request for an unknown session does not borrow a sibling's tps", () => {
+	test("a scoped request for an unknown session does not borrow a sibling's tps/ttft", () => {
 		const text = renderStatusline({
 			config: cfg,
 			store: storeWithAAA,
@@ -2005,10 +2286,10 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 		});
 		// AAA's distinctive values must NOT leak into BBB's statusline.
 		expect(text).not.toContain("144");
-		// Columns stay reserved (no reflow) via the waiting placeholder, and
-		// the brand chip still rides along (a claude is attached).
+		expect(text).not.toContain("1234");
+		// Columns stay reserved (no reflow) via the waiting placeholder.
 		expect(text).toMatch(/tps[▁-▒ ]*na/);
-		expect(text).toMatch(/clawback\.md/);
+		expect(text).toMatch(/ttft[▁-▒ ]*na/);
 	});
 
 	test("two known sessions render their own distinct metrics, not a shared aggregate", () => {
@@ -2020,6 +2301,7 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 			cacheCreationTokens: 0,
 			cacheMissTokens: 0,
 			recentTps: [55, 55, 55, 55],
+			recentTtftMs: [4321, 4321, 4321, 4321],
 		};
 		const store2 = {
 			keys: () => ["AAA", "BBB"],
@@ -2042,9 +2324,13 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 			claudeSession: attachedClaude,
 		});
 		expect(a).toContain("144");
+		expect(a).toContain("1234");
 		expect(a).not.toContain("55");
+		expect(a).not.toContain("4321");
 		expect(b).toContain("55");
+		expect(b).toContain("4321");
 		expect(b).not.toContain("144");
+		expect(b).not.toContain("1234");
 	});
 
 	test("the legacy no-id endpoint still aggregates via mostRecentSession", () => {
@@ -2056,6 +2342,7 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 			claudeSession: attachedClaude,
 		});
 		expect(text).toContain("144");
+		expect(text).toContain("1234");
 	});
 
 	test("a scoped request for a known session renders that session's own metrics", () => {
@@ -2067,5 +2354,6 @@ describe("per-session statusline scoping (regression: borrowed metrics, 2026-06-
 			claudeSession: attachedClaude,
 		});
 		expect(text).toContain("144");
+		expect(text).toContain("1234");
 	});
 });

@@ -95,6 +95,7 @@ export function setupStatusline({
 		};
 	}
 
+	const previous = hadStatusLine ? existing.statusLine : null;
 	const next = { ...existing, statusLine: block };
 	fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 	fs.writeFileSync(targetPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
@@ -103,7 +104,10 @@ export function setupStatusline({
 	if (!exists) action = "created";
 	else if (hadStatusLine) action = "overwrote";
 	else action = "merged";
-	return { targetPath, action, command };
+	// `previous` is the statusLine block we displaced — the block on an
+	// `overwrote`, null on `created`/`merged`. Mirrors the skip-path return
+	// so a forcing caller (e.g. quickstart) can surface what it replaced.
+	return { targetPath, action, command, previous };
 }
 
 /**

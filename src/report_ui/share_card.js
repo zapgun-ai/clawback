@@ -300,7 +300,7 @@ export function fmtSigned(n) {
 // and bakes pageGloss into the top-left, so what you see is what you'd share.
 // Direction always lives in the *text* — the signed headline
 // ("+68%"/"−151%") and the signed gloss figure ("+"/"−") — never colour alone
-// (WCAG 1.4.1). The kicker is brand voice ("professional tokenmaxxing") in every
+// (WCAG 1.4.1). The kicker is brand voice ("professional claude tokenmaxxing") in every
 // case and carries no direction. The per-turn rate is robust even when the arms
 // aren't turn-matched.
 export function deriveHeroModel(summary) {
@@ -311,7 +311,7 @@ export function deriveHeroModel(summary) {
 		// honest to say (bragText falls back to a neutral line for pct == null).
 		return {
 			headline: "—",
-			kicker: "professional tokenmaxxing",
+			kicker: "professional claude tokenmaxxing",
 			tone: "even",
 			subhead: null,
 			pct: null,
@@ -361,7 +361,7 @@ export function deriveHeroModel(summary) {
 	// run's result — so direction never rides on it. Both the signed headline and
 	// the signed gloss carry the win/loss in text, so colour is never the sole
 	// signal (WCAG 1.4.1).
-	const kicker = "professional tokenmaxxing";
+	const kicker = "professional claude tokenmaxxing";
 
 	let headline;
 	if (pct == null) {

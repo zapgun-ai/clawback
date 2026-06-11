@@ -4,11 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Regression tests for the watch-run skill's error-detection pipeline
-// (.skills/watch-run/scripts/watch_run.sh). Two of these bugs fired in
-// production during a live 75-min L1 run (a startup crash and a false ERROR on
-// a healthy keep-alive ping); a third is a sibling of the same "a number
-// matched where it shouldn't" class. The watcher exposes a hidden
+// Regression tests for scripts/watch_run.sh's error-detection pipeline. Two of
+// these bugs fired in production during a live 75-min L1 run (a startup crash
+// and a false ERROR on a healthy keep-alive ping); a third is a sibling of the
+// same "a number matched where it shouldn't" class. The watcher exposes a hidden
 // `--errcount <file>` entry point so the detection can be exercised in isolation.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

@@ -111,13 +111,6 @@ test("`quickstart` exits cleanly after launching claude (no parseArgs fall-throu
 		"utf8",
 	);
 	expect(proxyLog).toMatch(/label=clawback\b/);
-
-	// quickstart writes .gitignore itself (cwd is not a git repo here) and
-	// reports it, rather than telling the operator to "Gitignore that file."
-	expect(stdout).toMatch(/created \.gitignore/);
-	expect(stdout).not.toMatch(/Gitignore that file/);
-	const gitignore = fs.readFileSync(path.join(cwd, ".gitignore"), "utf8");
-	expect(gitignore).toMatch(/CLAWBACK\.md/);
 });
 
 test("`quickstart --no-launch` exits 0 without spawning claude", async () => {
@@ -132,50 +125,39 @@ test("`quickstart --no-launch` exits 0 without spawning claude", async () => {
 	expect(stderr).not.toMatch(/ERR_PARSE_ARGS/);
 	expect(stdout).toMatch(/--no-launch set; skipping claude/);
 	expect(code).toBe(0);
-
-	// Default is loopback HTTP: the dashboard opens over http://, and none of
-	// the LAN-only affordances (token surfacing, attach hint, 0.0.0.0 bind
-	// notice) should appear.
-	expect(stdout).toMatch(/dashboard will auto-open at http:\/\//);
-	expect(stdout).not.toMatch(/adminToken:/);
-	expect(stdout).not.toMatch(/bound to 0\.0\.0\.0/);
-	expect(stdout).not.toMatch(/attach another machine/);
-
-	// And the written config reflects the loopback posture.
-	const cfg = fs.readFileSync(path.join(cwd, "CLAWBACK.md"), "utf8");
-	expect(cfg).toMatch(/host:\s*"?127\.0\.0\.1"?/);
-	expect(cfg).not.toMatch(/selfSign/);
 });
 
-test("`quickstart --lan --no-launch` binds 0.0.0.0 with TLS and surfaces the LAN affordances", async () => {
-	const { code, stdout, stderr } = await runBin(
-		["quickstart", "--lan", "--no-launch"],
-		{
-			cwd,
-			env: {
-				HOME: homeDir,
-				// Isolate any mkcert/self-signed cert writes to a temp data dir.
-				XDG_DATA_HOME: path.join(homeDir, "xdg-data"),
-				PATH: `${fakeBinDir}:${process.env.PATH}`,
-				CLAWBACK_NO_OPEN_BROWSER: "1",
-			},
-		},
+test("`quickstart` re-wires the statusline over a pre-existing foreign block and says so", async () => {
+	// Operator already has a custom Claude Code statusline. A clean
+	// install must still leave clawback's metrics statusline effective —
+	// and tell the operator what it displaced (not silently overwrite).
+	fs.mkdirSync(path.join(homeDir, ".claude"), { recursive: true });
+	fs.writeFileSync(
+		path.join(homeDir, ".claude", "settings.json"),
+		`${JSON.stringify(
+			{ statusLine: { type: "command", command: "echo MY-CUSTOM" } },
+			null,
+			2,
+		)}\n`,
 	);
-	expect(stderr).not.toMatch(/ERR_PARSE_ARGS/);
+
+	const { code, stdout } = await runBin(["quickstart", "--no-launch"], {
+		cwd,
+		env: {
+			HOME: homeDir,
+			PATH: `${fakeBinDir}:${process.env.PATH}`,
+			CLAWBACK_NO_OPEN_BROWSER: "1",
+		},
+	});
 	expect(code).toBe(0);
+	expect(stdout).toMatch(/overwrote statusline/);
+	expect(stdout).toMatch(/replaced your existing \(non-clawback\) statusLine/);
+	expect(stdout).toMatch(/previous: echo MY-CUSTOM/);
 
-	// LAN posture in the written config.
-	const cfg = fs.readFileSync(path.join(cwd, "CLAWBACK.md"), "utf8");
-	expect(cfg).toMatch(/host:\s*"?0\.0\.0\.0"?/);
-	expect(cfg).toMatch(/selfSign:\s*true/);
-
-	// LAN dashboard is HTTPS and the LAN affordances are surfaced.
-	expect(stdout).toMatch(/dashboard will auto-open at https:\/\//);
-	expect(stdout).toMatch(/bound to 0\.0\.0\.0/);
-	// mkcert may or may not be installed in this environment; either the
-	// minted-cert line or the not-found fallback note is acceptable, but the
-	// run must not crash.
-	expect(stdout + stderr).toMatch(/mkcert|self-signed/);
+	const parsed = JSON.parse(
+		fs.readFileSync(path.join(homeDir, ".claude", "settings.json"), "utf8"),
+	);
+	expect(parsed.statusLine.command).toMatch(/_proxy\/statusline/);
 });
 
 test("`quick` is an alias for `quickstart` (no fall-through to parseArgs)", async () => {
@@ -215,24 +197,4 @@ test("`up` is an alias for `quickstart` (no fall-through to parseArgs)", async (
 	expect(stderr).not.toMatch(/unknown subcommand/);
 	expect(stdout).toMatch(/--no-launch set; skipping claude/);
 	expect(code).toBe(0);
-});
-
-test("bare `clawback` creates a .gitignore for its detritus before starting", async () => {
-	// `--admin-path v1` is rejected by config validation, so start() throws
-	// and the process exits 1 fast — but the bare command writes .gitignore
-	// BEFORE start(), so we can assert it landed without leaving a server
-	// running to kill. (cwd is a bare temp dir — no .git/ — proving the
-	// forced write doesn't depend on a repo.)
-	const { code, stderr } = await runBin(["--admin-path", "v1"], {
-		cwd,
-		env: { HOME: homeDir },
-		timeoutMs: 10000,
-	});
-	expect(code).toBe(1);
-	expect(stderr).toMatch(/failed to start/);
-
-	const gitignore = fs.readFileSync(path.join(cwd, ".gitignore"), "utf8");
-	expect(gitignore).toMatch(/CLAWBACK\.md/);
-	expect(gitignore).toMatch(/data\//);
-	expect(gitignore).toMatch(/logs\//);
 });

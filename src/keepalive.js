@@ -140,7 +140,7 @@ export class KeepAliveScheduler {
 		return Math.floor(min + this._random() * span);
 	}
 
-	_scheduleNext(sessionKey) {
+	_scheduleNext(sessionKey, minDelayMs = 0) {
 		if (this._stopped) return;
 		// Enforce ≤1 live timer per session at the single creation choke point.
 		// _tick deletes the map entry before its async ping, so a real turn's

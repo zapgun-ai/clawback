@@ -2,7 +2,7 @@
 /**
  * Verify a captured /v1/messages fixture is usable for replay.
  *
- * The replay arm is only faithful if the fixture carries at
+ * The replay arm (TEST.md §4b) is only faithful if the fixture carries at
  * least one `cache_control` breakpoint: without one, clawback's 1h-TTL
  * rewrite (arm A2) has nothing to rewrite and the headline knob silently
  * becomes a no-op — making absolute replay numbers meaningless. This guard

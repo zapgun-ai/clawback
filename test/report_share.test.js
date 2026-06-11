@@ -600,7 +600,7 @@ describe("share card text contrast (WCAG, large text ≥3:1 on the solid field)"
 describe("buildSharePayload (tier filtering — the egress contract)", () => {
 	const model = {
 		headline: "+97%",
-		kicker: "professional tokenmaxxing",
+		kicker: "professional claude tokenmaxxing",
 		subhead: "efficiency",
 		tone: "pos",
 		pageGloss: "+175,537 tokens",
@@ -631,7 +631,7 @@ describe("buildSharePayload (tier filtering — the egress contract)", () => {
 		expect(p.tier).toBe("minimal");
 		expect(p.card).toEqual({
 			headline: "+97%",
-			kicker: "professional tokenmaxxing",
+			kicker: "professional claude tokenmaxxing",
 			subhead: "efficiency",
 			tone: "pos",
 			pageGloss: "+175,537 tokens",

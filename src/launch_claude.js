@@ -1,6 +1,43 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { loadConfig } from "./config.js";
-import { ensurePtySpawnHelperExecutable } from "./pty_helper_perms.js";
+
+/**
+ * Resolve `command` to an executable file the way the shell would: search
+ * each `env.PATH` entry, unless the command already contains a path
+ * separator (then check it directly). Returns the resolved path, or null
+ * when nothing matches an executable regular file. Symlinks are followed,
+ * so the usual `claude` -> versioned-binary symlink resolves as a file.
+ */
+export function resolveCommandOnPath(command, env = process.env) {
+	const candidates = command.includes("/")
+		? [path.resolve(command)]
+		: (env.PATH ?? "")
+				.split(path.delimiter)
+				.filter(Boolean)
+				.map((dir) => path.join(dir, command));
+	for (const candidate of candidates) {
+		try {
+			fs.accessSync(candidate, fs.constants.X_OK);
+			if (fs.statSync(candidate).isFile()) return candidate;
+		} catch {}
+	}
+	return null;
+}
+
+function commandNotFoundMessage(command) {
+	const lines = [`\`${command}\` not found on PATH.`];
+	if (command === "claude") {
+		lines.push(
+			"clawback launches the Claude Code CLI, which doesn't appear to be installed. Install it, then re-run:",
+			"  curl -fsSL https://claude.ai/install.sh | bash    # macOS/Linux installer",
+			"  npm install -g @anthropic-ai/claude-code          # or via npm",
+			"Docs: https://code.claude.com/docs",
+		);
+	}
+	return lines.join("\n");
+}
 
 /**
  * Build the ANTHROPIC_BASE_URL value a client should use to reach a clawback
@@ -93,6 +130,18 @@ export async function launchClaude({
 	label = null,
 	remoteUrl = null,
 } = {}) {
+	// Preflight: fail with install instructions instead of an opaque async
+	// ENOENT (spawn mode) or a PTY teardown (node-pty) when the claude CLI
+	// isn't installed. Skipped when the caller injects spawnFn/ptyFactory —
+	// those never exec a real binary (tests, embedders).
+	if (
+		spawnFn == null &&
+		ptyFactory == null &&
+		!resolveCommandOnPath(command, env)
+	) {
+		throw new Error(commandNotFoundMessage(command));
+	}
+
 	let resolvedConfig = config;
 	let sources = [];
 	if (!resolvedConfig) {
@@ -133,42 +182,27 @@ export async function launchClaude({
 	}
 
 	const allowPty = stdinIsTty && stdoutIsTty && spawnFn == null;
-	let ptyError = null;
 	if (allowPty) {
 		const factory = ptyFactory ?? (await loadDefaultPtyFactory());
 		if (factory) {
-			try {
-				const ptyProcess = factory({
-					command,
-					args,
-					cwd,
-					env: childEnv,
-					cols: cols ?? 80,
-					rows: rows ?? 24,
-				});
-				return {
-					ptyProcess,
-					baseUrl,
-					proxyUrl,
-					clawbackId,
-					label,
-					config: resolvedConfig,
-					sources,
-					mode: "pty",
-				};
-			} catch (e) {
-				// node-pty's `pty.fork` throws synchronously when it can't
-				// even spawn its own spawn-helper — classically
-				// `posix_spawnp failed.` when that prebuilt binary lost its
-				// execute bit. ensurePtySpawnHelperExecutable() above is
-				// meant to prevent exactly this, but if anything still trips
-				// the fork (read-only FS, an unforeseen layout), fall through
-				// to plain pass-through spawn so claude still launches —
-				// trading away PTY-only keystroke injection (auto-continue)
-				// for this session. The caller surfaces the reason via
-				// `ptyError`.
-				ptyError = e;
-			}
+			const ptyProcess = factory({
+				command,
+				args,
+				cwd,
+				env: childEnv,
+				cols: cols ?? 80,
+				rows: rows ?? 24,
+			});
+			return {
+				ptyProcess,
+				baseUrl,
+				proxyUrl,
+				clawbackId,
+				label,
+				config: resolvedConfig,
+				sources,
+				mode: "pty",
+			};
 		}
 	}
 
@@ -187,10 +221,6 @@ export async function launchClaude({
 		config: resolvedConfig,
 		sources,
 		mode: "spawn",
-		// Set only when a PTY launch was attempted and threw, so the caller
-		// can warn that auto-continue/keystroke-injection is unavailable for
-		// this pass-through session.
-		ptyError,
 	};
 }
 
@@ -203,12 +233,6 @@ export async function launchClaude({
 async function loadDefaultPtyFactory() {
 	try {
 		const nodePty = await import("node-pty");
-		// node-pty's prebuilt spawn-helper often ships without its execute
-		// bit (packed-tarball install, hoisted under a different
-		// node_modules than a postinstall chmod would reach). Restore it
-		// before the first `pty.fork`, otherwise that fork throws
-		// "posix_spawnp failed." See src/pty_helper_perms.js.
-		ensurePtySpawnHelperExecutable();
 		return ({ command, args, cwd, env, cols, rows }) =>
 			nodePty.spawn(command, args, {
 				name: env.TERM ?? "xterm-256color",

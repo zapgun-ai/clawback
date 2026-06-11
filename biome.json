@@ -12,6 +12,7 @@
 			"node_modules",
 			"coverage",
 			"runs",
+			"tmp",
 			"*.tmp",
 			"benchmark/fixtures"
 		]

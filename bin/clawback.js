@@ -19,12 +19,8 @@ import {
 import { loadConfig } from "../src/config.js";
 import { runDoctor } from "../src/doctor.js";
 import { start } from "../src/index.js";
-import { ensureGitignored, initConfig } from "../src/init.js";
-import {
-	detectMkcert,
-	initCert,
-	resolveDefaultCertPaths,
-} from "../src/init_cert.js";
+import { initConfig } from "../src/init.js";
+import { initCert, resolveDefaultCertPaths } from "../src/init_cert.js";
 import { buildBaseUrl, launchClaude } from "../src/launch_claude.js";
 import { openBrowser, waitForUrl } from "../src/open_browser.js";
 import { probeClawback } from "../src/probe.js";
@@ -418,6 +414,7 @@ Tip:
 			recordLabel,
 			result.proxyUrl,
 		);
+		await postSessionLabel(peekedConfig, clawbackId, clawbackLabel);
 		const noopLogger = {
 			info: () => {},
 			warn: () => {},
@@ -594,11 +591,6 @@ Tip:
 	}
 	if (result) {
 		const { mode, baseUrl } = result;
-		if (result.ptyError) {
-			logger.warn(
-				`PTY launch failed (${result.ptyError.message}); fell back to pass-through spawn — auto-continue and GUI keystroke injection are unavailable for this session`,
-			);
-		}
 		logger.info(
 			`spawned claude (${mode}) with ANTHROPIC_BASE_URL=${baseUrl} [session=${clawbackId}${
 				clawbackLabel ? `, label=${clawbackLabel}` : ""
@@ -1060,7 +1052,6 @@ fails.
 			help: { type: "boolean" },
 			force: { type: "boolean", short: "f" },
 			project: { type: "boolean" },
-			lan: { type: "boolean" },
 			"no-launch": { type: "boolean" },
 		},
 		allowPositionals: false,
@@ -1070,14 +1061,14 @@ fails.
 		process.stdout.write(`clawback quickstart - one-command setup + launch
 
 Usage:
-  clawback quickstart [--project] [--lan] [--force] [--no-launch]
+  clawback quickstart [--project] [--force] [--no-launch]
   clawback quick      ...   alias for \`clawback quickstart\`
   clawback up         ...   alias for \`clawback quickstart\`
 
 Behavior:
   Sets up clawback with a default-good config and launches claude:
     1. clawback init --local        (creates ./CLAWBACK.md if absent)
-    2. overlays default-good knobs  (host=127.0.0.1, keepAliveModeExtended=true)
+    2. overlays default-good knobs  (host=0.0.0.0, keepAliveModeExtended=true)
     3. clawback setup claude        (wires the Claude Code statusline)
     4. clawback claude --label clawback
                                     (launches claude pointed at clawback;
@@ -1086,21 +1077,11 @@ Behavior:
     5. opens the dashboard in your default browser once the proxy is
        reachable (suppress with CLAWBACK_NO_OPEN_BROWSER=1)
 
-  Default: serve locally and securely. The proxy binds 127.0.0.1 over
-  plain HTTP — traffic never leaves the machine, so there's no cert, no
-  browser "Not secure" warning, and the statusline is a trivial local
-  request.
-
-  --lan: bind 0.0.0.0 for the laptop-runs-clawback / phone-views-dashboard
-  flow. This pairs an auto-minted adminToken with the LAN bind (mutating
-  endpoints bearer-gated; GETs stay open) and enables TLS. quickstart then
-  provisions a BROWSER-TRUSTED cert via mkcert when mkcert is installed, so
-  the dashboard opens with a clean padlock; without mkcert it falls back to
-  a self-signed cert (browser warns until you trust it).
-
-  quickstart adds CLAWBACK.md, data/ and logs/ to ./.gitignore, creating
-  the file if absent, so clawback's config + detritus can't be committed
-  once the directory becomes a git repo.
+  The host=0.0.0.0 overlay also mints an adminToken into the config
+  when one is missing, so the LAN bind is always paired with a shared
+  secret. Mutating endpoints are bearer-gated; GETs stay open and
+  expose session metadata to the LAN — see README "Securing a
+  non-loopback bind".
 
   Step 4 and the browser open are skipped when --no-launch is passed,
   which is useful in scripts and tests.
@@ -1108,9 +1089,6 @@ Behavior:
 Options:
       --project    Write the statusline to <cwd>/.claude/settings.json
                    (project scope) instead of ~/.claude/settings.json
-      --lan        Bind 0.0.0.0 (LAN-reachable) with TLS for remote/phone
-                   access, preferring a browser-trusted mkcert cert.
-                   Default is loopback HTTP.
   -f, --force      Re-run init + setup even when targets already exist
       --no-launch  Stop after step 3; don't launch claude
       --help       Show this help
@@ -1127,7 +1105,6 @@ Notes:
 		qsResult = runQuickstart({
 			force: qsArgs.force ?? false,
 			project: qsArgs.project ?? false,
-			lan: qsArgs.lan ?? false,
 			loadConfigFn: () => loadConfig({ cwd: process.cwd() }),
 		});
 	} catch (e) {
@@ -1144,96 +1121,37 @@ Notes:
 	process.stdout.write(`${initLine}\n`);
 	if (qsResult.init.adminTokenMinted) {
 		process.stdout.write(
-			`clawback quickstart: adminToken generated in ${qsResult.init.targetPath} (chmod 0600)\n`,
-		);
-	}
-	// Report what we did to .gitignore instead of telling the operator to
-	// do it themselves. forceGitignore guarantees the file is created even
-	// outside a git repo, so the only actions we'll see are created / added
-	// / already-present; the first two are worth a line.
-	const qsGitignore = qsResult.gitignore;
-	if (qsGitignore?.action === "created") {
-		process.stdout.write(
-			`clawback quickstart: created .gitignore (${qsGitignore.added.join(", ")})\n`,
-		);
-	} else if (qsGitignore?.action === "added") {
-		process.stdout.write(
-			`clawback quickstart: updated .gitignore (added ${qsGitignore.added.join(", ")})\n`,
+			`clawback quickstart: adminToken generated in ${qsResult.init.targetPath} (chmod 0600). Gitignore that file.\n`,
 		);
 	}
 
 	const setupLine =
 		qsResult.setup.action === "skipped"
-			? `clawback quickstart: ${qsResult.setup.targetPath} ${qsResult.setup.reason}`
-			: `clawback quickstart: ${qsResult.setup.action} ${qsResult.setup.targetPath}`;
+			? `clawback quickstart: statusline already wired at ${qsResult.setup.targetPath}; left alone`
+			: `clawback quickstart: ${qsResult.setup.action} statusline at ${qsResult.setup.targetPath}`;
 	process.stdout.write(`${setupLine}\n`);
 
-	// Make sure the statusline actually shows up: Claude Code resolves
-	// settings.local.json > project settings.json > user settings.json, so a
-	// clawback statusLine at a higher tier silently shadows the one quickstart
-	// just wrote. The `setup` branch already warns about this; quickstart wires
-	// the same statusLine, so it needs the same guard or the operator is left
-	// wondering why their statusline is blank. Advisory only — never fail
-	// quickstart on the scan.
-	try {
-		const { conflicts } = detectStatuslineTierConflicts({
-			targetPath: qsResult.setup.targetPath,
-		});
-		for (const c of conflicts) {
-			if (c.shadows === true) {
-				process.stderr.write(
-					`clawback quickstart: warning: a clawback statusLine also exists at a HIGHER-precedence tier:\n  ${c.path} (${c.tier})\n  Claude Code will use THAT one, not the block just written. Refresh or remove it.\n`,
-				);
-			} else if (c.shadows === false) {
-				process.stderr.write(
-					`clawback quickstart: note: a now-redundant clawback statusLine also exists at a lower tier:\n  ${c.path} (${c.tier})\n`,
-				);
-			} else {
-				process.stderr.write(
-					`clawback quickstart: note: another clawback statusLine also exists at ${c.path} (${c.tier}).\n`,
-				);
-			}
-		}
-	} catch {
-		/* advisory scan — never fail quickstart on it */
+	// We force-wired clawback's statusline over a statusLine the operator
+	// already had at this tier (because clawback's wasn't the effective
+	// block — setup "hadn't been run yet"). Surface what we displaced and
+	// how to get it back, so the overwrite isn't a silent surprise.
+	if (qsResult.setup.replacedForeign && qsResult.setup.previous) {
+		const prev = qsResult.setup.previous;
+		const prevDesc =
+			typeof prev.command === "string" ? prev.command : JSON.stringify(prev);
+		process.stdout.write(
+			`clawback quickstart: replaced your existing (non-clawback) statusLine to wire clawback's metrics.\n  previous: ${prevDesc}\n  to restore it, edit ${qsResult.setup.targetPath} (or run \`clawback uninstall\` to drop clawback's).\n`,
+		);
 	}
 
-	// `--lan` enables TLS (via the 0.0.0.0 overlay). Prefer a browser-trusted
-	// mkcert cert over the self-signed fallback so the auto-opened dashboard
-	// shows a clean padlock instead of a "Not secure" warning. Done BEFORE the
-	// `clawback claude` child boots the in-process proxy: provisionTlsCert
-	// reuses an existing cert at the default path, so a cert minted here wins
-	// over the selfSign fallback. Best-effort — if mkcert isn't usable the
-	// child's selfSign overlay still mints a working self-signed pair.
-	if (qsArgs.lan) {
-		const mk = detectMkcert();
-		if (mk.available) {
-			try {
-				const cert = initCert({ mkcert: true });
-				if (cert.action === "skipped") {
-					process.stdout.write(
-						`clawback quickstart: reusing existing cert at ${cert.certPath}\n`,
-					);
-				} else {
-					process.stdout.write(
-						`clawback quickstart: minted a browser-trusted cert via mkcert (${cert.certPath})\n`,
-					);
-				}
-				if (!mk.caRootInstalled) {
-					process.stderr.write(
-						"clawback quickstart: mkcert's local CA isn't installed yet — run\n  mkcert -install\nonce (idempotent) so browsers trust the cert, then relaunch the browser.\n",
-					);
-				}
-			} catch (e) {
-				process.stderr.write(
-					`clawback quickstart: mkcert provisioning failed (${e.message}); falling back to a self-signed cert (browser will warn).\n`,
-				);
-			}
-		} else {
-			process.stderr.write(
-				"clawback quickstart: mkcert not found — falling back to a self-signed cert (browser will warn).\n  Install mkcert (`brew install mkcert` on macOS) and run `mkcert -install` for a trusted, warning-free dashboard.\n",
-			);
-		}
+	// The wire landed, but a higher-precedence statusLine at another Claude
+	// Code settings tier still shadows it — so the statusline stays dark
+	// until the operator resolves it. clawback writes one tier and won't
+	// silently delete a block at a tier it didn't target.
+	if (qsResult.setup.shadowedBy) {
+		process.stderr.write(
+			`clawback quickstart: warning: a higher-precedence statusLine at ${qsResult.setup.shadowedBy.path} (${qsResult.setup.shadowedBy.tier}) will shadow the block just written.\n  Claude Code renders THAT one. Remove or refresh it, or re-run with the tier it lives in, e.g. \`clawback setup claude --project --force\`.\n`,
+		);
 	}
 
 	// Resolve the dashboard URL from the loaded config so the print + open
@@ -1248,25 +1166,19 @@ Notes:
 	const qsAdminPrefix = qsConfig.adminPathPrefix ?? "_proxy";
 	const dashboardUrl = `${qsScheme}://${qsHost}:${qsPort}/${qsAdminPrefix}/ui/`;
 	const healthUrl = `${qsScheme}://${qsHost}:${qsPort}/${qsAdminPrefix}/health`;
-	// LAN mode (--lan / a 0.0.0.0 bind) is the only case where the adminToken
-	// and the attach/remote affordances are load-bearing: a phone hitting the
-	// dashboard over 192.168.x is NOT loopback-exempt and needs the token, and
-	// remote `clawback claude` sessions need it to attach. On the loopback
-	// default the proxy isn't reachable off-box and the bearer check is exempt,
-	// so surfacing the token + an attach hint would only be confusing noise.
-	const qsIsLan = qsConfig.host === "0.0.0.0" || qsConfig.host === "::";
-	// Bake the token into the auto-opened URL as a fragment so the UI boots
-	// already-authorized for LAN clients. The fragment is read by
-	// `src/ui/app.js`, saved to localStorage, then stripped from the address
-	// bar. Only worth it in LAN mode; loopback opens the bare URL.
-	const dashboardUrlWithToken =
-		qsIsLan && qsConfig.adminToken
-			? `${dashboardUrl}#token=${encodeURIComponent(qsConfig.adminToken)}`
-			: dashboardUrl;
+	// Bake the token into the auto-opened URL as a fragment so the UI
+	// boots already-authorized for LAN clients (loopback is exempt from
+	// the bearer check at `admin.js`, but a phone hitting this same URL
+	// over 192.168.x is not, and the UI's DELETE/POST buttons would 401
+	// without the token). The fragment is read by `src/ui/app.js`, saved
+	// to localStorage, then stripped from the address bar.
+	const dashboardUrlWithToken = qsConfig.adminToken
+		? `${dashboardUrl}#token=${encodeURIComponent(qsConfig.adminToken)}`
+		: dashboardUrl;
 	process.stdout.write(
 		`clawback quickstart: dashboard will auto-open at ${dashboardUrl}\n`,
 	);
-	if (qsIsLan && qsConfig.adminToken) {
+	if (qsConfig.adminToken) {
 		// Surface the token directly so the operator can (a) authorize the
 		// dashboard when loading it on a phone/other host, and (b) attach
 		// remote `clawback claude` sessions to this proxy. Printed every
@@ -1284,11 +1196,15 @@ Notes:
 		// wrong some of the time. `<this-host>` is an obvious placeholder
 		// the operator substitutes with whatever name resolves on the
 		// network they care about (LAN IP, Tailscale name, `.local`).
+		const attachHost =
+			qsConfig.host === "0.0.0.0" || qsConfig.host === "::"
+				? "<this-host>"
+				: qsHost;
 		process.stdout.write(
-			`clawback quickstart: attach another machine with:\n  clawback claude --remote ${qsScheme}://<this-host>:${qsPort} --admin-token ${qsConfig.adminToken}\n`,
+			`clawback quickstart: attach another machine with:\n  clawback claude --remote ${qsScheme}://${attachHost}:${qsPort} --admin-token ${qsConfig.adminToken}\n`,
 		);
 	}
-	if (qsIsLan) {
+	if (qsConfig.host === "0.0.0.0" || qsConfig.host === "::") {
 		process.stdout.write(
 			`clawback quickstart: bound to ${qsConfig.host} (LAN-reachable); mutating endpoints gated by adminToken, GETs open.\n`,
 		);
@@ -1663,6 +1579,7 @@ const { values } = parseArgs({
 		"statusline-tps-threshold-low": { type: "string" },
 		"statusline-tps-threshold-high": { type: "string" },
 		"statusline-tps-calibration": { type: "string" },
+		"statusline-ttft-calibration": { type: "string" },
 		"admin-token": { type: "string" },
 		tls: { type: "string" },
 		"tls-cert": { type: "string" },
@@ -1679,10 +1596,8 @@ if (values.help) {
 
 Usage:
   clawback [options]
-  clawback quickstart [--project] [--lan]        one-command setup + launch
-                      [--force]                  (init + setup + claude;
-                                                 loopback HTTP by default,
-                                                 --lan binds 0.0.0.0 w/ TLS;
+  clawback quickstart [--project] [--force]      one-command setup + launch
+                                                 (init + setup + claude;
                                                  \`clawback quick\` / \`clawback up\` are aliases)
   clawback clean [--force]                       remove generated data
                                                  (state, turn log, session logs)
@@ -1867,8 +1782,9 @@ Options:
                                 TTY, on otherwise). Color is "bars only" —
                                 labels and numeric values stay terminal-
                                 default. Defaults: 50/80% for percentage
-                                fields, 15/40 for tps; tunable via the
-                                --statusline-*-threshold-* flags below.
+                                fields, 500/2000ms for ttft, 30/80 for tps;
+                                tunable via the --statusline-*-threshold-*
+                                flags below.
       --statusline-pct-threshold-low <n>
                                 Boundary between green and yellow on the
                                 percentage ramp (default 50). Applies to
@@ -1881,15 +1797,14 @@ Options:
                                 low. Set low === high to drop the warn
                                 band (binary good/bad).
       --statusline-ttft-threshold-low-ms <n>
-                                TTFT (ms) below which a turn counts as
-                                "warm" (green) on the web UI's TTFT
-                                chart bands (default 3000). The
-                                statusline itself no longer shows TTFT.
+                                TTFT (ms) below which a turn is "warm"
+                                (green) in absolute mode, and the fallback
+                                used in relative mode before the per-session
+                                ring has enough samples (default 3000).
       --statusline-ttft-threshold-high-ms <n>
-                                TTFT (ms) at or above which a turn
-                                counts as "cold" (red) on the web UI's
-                                TTFT chart bands (default 5000). Must
-                                be >= --low-ms.
+                                TTFT (ms) at or above which a turn is
+                                "cold" (red) in absolute mode / fallback
+                                (default 5000). Must be >= --low-ms.
       --statusline-tps-threshold-low <n>
                                 TPS below which a turn is "slow" (red)
                                 in absolute mode, and the fallback used
@@ -1909,6 +1824,17 @@ Options:
                                 "fast/slow for this model." "absolute":
                                 always use --statusline-tps-threshold-low
                                 and --high as fixed cutoffs.
+      --statusline-ttft-calibration <relative|absolute>
+                                How to derive TTFT color bands. "absolute"
+                                (default): use --statusline-ttft-threshold-
+                                low-ms and --high-ms as a fixed wall-clock
+                                budget, so green means a genuinely warm cache.
+                                "relative": low = median*1.5, high = median*3
+                                from the session's recentTtftMs ring — colors
+                                mean "fast/slow for this link." Relative hides
+                                a consistently-cold cache (slow reads as
+                                "normal"), so absolute is the default for this
+                                warmth signal.
       --force-non-streaming <on|off>
                                 Rewrite parsedBody.stream from true to false
                                 before forwarding, so Anthropic returns a
@@ -2161,6 +2087,16 @@ if (values["statusline-tps-calibration"] !== undefined) {
 	}
 	cli.statuslineTpsCalibration = v;
 }
+if (values["statusline-ttft-calibration"] !== undefined) {
+	const v = values["statusline-ttft-calibration"];
+	if (v !== "relative" && v !== "absolute") {
+		process.stderr.write(
+			`--statusline-ttft-calibration must be "relative" or "absolute" (got ${JSON.stringify(v)})\n`,
+		);
+		process.exit(1);
+	}
+	cli.statuslineTtftCalibration = v;
+}
 if (values["auto-continue-text"])
 	cli.autoContinueText = values["auto-continue-text"].replace(/\\n/g, "\n");
 if (values["auto-continue-cooldown-sec"])
@@ -2178,28 +2114,6 @@ function parseBool(v) {
 	if (s === "on" || s === "true" || s === "1" || s === "yes") return true;
 	if (s === "off" || s === "false" || s === "0" || s === "no") return false;
 	throw new Error(`expected on|off, got: ${v}`);
-}
-
-// Running the bare proxy writes its detritus (data/, logs/) into the launch
-// directory and auto-discovers ./CLAWBACK.md there. Pre-ignore all of it so a
-// `clawback` run inside (or about to become) a repo can't leak state/logs or
-// the secret-bearing config into a commit — same managed entries as
-// `clawback init` / `quickstart`. Forced so the .gitignore lands even before
-// the directory is `git init`'d, matching the "make sure it creates" intent.
-// Best-effort: a .gitignore write must never block the proxy from starting.
-try {
-	const gi = ensureGitignored(process.cwd(), { force: true });
-	if (gi.action === "created") {
-		process.stderr.write(
-			`clawback: created .gitignore (${gi.added.join(", ")})\n`,
-		);
-	} else if (gi.action === "added") {
-		process.stderr.write(
-			`clawback: updated .gitignore (added ${gi.added.join(", ")})\n`,
-		);
-	}
-} catch {
-	/* best-effort — see comment above */
 }
 
 try {

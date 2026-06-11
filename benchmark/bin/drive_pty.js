@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * PTY-driven load generator (the "faithful" load arm).
+ * PTY-driven load generator (the "faithful" arm of TEST.md §4a).
  *
  * Drives the REAL `claude` binary through clawback's own PTY channel
  * (reusing src/launch_claude.js -> ptyProcess.write(), the same mechanism
@@ -94,7 +94,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Loop predicate, extracted so it's unit-testable without spawning a PTY.
 // A run ends when claude exited, the turn budget is spent, OR the wall-clock
 // deadline passed. The deadline lets us drive a "run for N minutes" load
-// (timed blocks) instead of guessing a turn count that lands at the
+// (TEST.md timed blocks) instead of guessing a turn count that lands at the
 // wrong duration; turns then acts as an upper safety bound.
 export function shouldRunTurn({
 	index,

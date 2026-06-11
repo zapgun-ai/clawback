@@ -33,52 +33,6 @@ export function resolveDefaultCertPaths(env = process.env) {
 }
 
 /**
- * Probe for a usable mkcert install. `clawback quickstart --lan` uses this to
- * decide whether it can mint a *browser-trusted* cert (mkcert) instead of a
- * self-signed one that trips the "Not secure" warning.
- *
- * Two distinct facts matter and are reported separately:
- *   - `available`       — the `mkcert` binary is on PATH (we can run it at all).
- *   - `caRootInstalled` — `mkcert -install` has already added the local CA to
- *                         the system/browser trust stores. mkcert can ISSUE a
- *                         leaf without this, but browsers won't TRUST it until
- *                         the CA root is installed — so the caller echoes the
- *                         one-time `mkcert -install` hint when this is false.
- *
- * We never run `mkcert -install` ourselves (it mutates the system trust store
- * and may prompt for a password). `exec` is injectable so tests can drive the
- * available / ENOENT / not-yet-installed branches without a real mkcert.
- *
- * @returns {{ available: boolean, caRoot: string|null, caRootInstalled: boolean }}
- */
-export function detectMkcert({
-	env = process.env,
-	exec = execFileSync,
-	mkcertBin = "mkcert",
-} = {}) {
-	let caRoot;
-	try {
-		caRoot = String(
-			exec(mkcertBin, ["-CAROOT"], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "ignore"],
-				env,
-			}),
-		).trim();
-	} catch {
-		// ENOENT (not on PATH) or any other spawn/exit failure — treat mkcert
-		// as unavailable and let the caller fall back to self-signed.
-		return { available: false, caRoot: null, caRootInstalled: false };
-	}
-	const rootCa = caRoot ? path.join(caRoot, "rootCA.pem") : null;
-	return {
-		available: true,
-		caRoot: caRoot || null,
-		caRootInstalled: rootCa ? fs.existsSync(rootCa) : false,
-	};
-}
-
-/**
  * Generate a self-signed TLS cert + key via the system `openssl`. We shell
  * out rather than vendor a JS X.509 builder because openssl is universally
  * available on macOS/Linux and produces standards-compliant output without

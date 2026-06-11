@@ -102,8 +102,8 @@ export const DEFAULTS = {
 	// replay fixture with Claude Code's exact cache_control breakpoints
 	// (synthetic hand-authored bodies make 1h-TTL look like a no-op). It is
 	// read-only: capture happens BEFORE any mutation and never changes the
-	// bytes we forward, so it cannot confound a measurement. Exercised only
-	// by the benchmark/ harness (see .skills/capture).
+	// bytes we forward, so it cannot confound a measurement. Documented in
+	// TEST.md and exercised only by the benchmark/ harness.
 	captureBodyPath: null,
 	autoContinue: false,
 	// `\r` (carriage return) is what a real Enter keypress sends into
@@ -145,13 +145,18 @@ export const DEFAULTS = {
 	//     they're about to bite.
 	//   - ttft: TTFT in ms, lower = better. This is clawback's clearest
 	//     cache-warmth signal — a warm prompt-cache hit returns the first
-	//     token fast, a cold miss is slow. The statusline no longer renders
-	//     a ttft field (its slot carries the brand chip, operator-requested
-	//     2026-06-09); this pair now colors the web UI's ttft chart bands
-	//     only (ui/app.js reads it from /_proxy/health). Band: <3000ms
-	//     green ("warm"), 3000-5000ms yellow, ≥5000ms red ("cold or
-	//     upstream unhappy"). Operator-tuned 2026-06-01 (widened from a
-	//     fixed 2000 low so warm Opus sessions stop reading yellow).
+	//     token fast, a cold miss is slow. We default to ABSOLUTE calibration
+	//     so "green" means a genuinely warm cache against a wall-clock budget,
+	//     not merely "typical for this session." Relative calibration (opt in
+	//     via statuslineTtftCalibration below) anchors the bands to the
+	//     session's own median, which has a perverse failure mode for a
+	//     warmth signal: a session whose cache is *consistently* cold reads
+	//     all-green because slow is "normal for it" — masking the exact state
+	//     clawback exists to fix (operator-flagged 2026-06-02). Absolute band:
+	//     <3000ms green ("warm"), 3000-5000ms yellow, ≥5000ms red ("cold or
+	//     upstream unhappy"). Operator-tuned 2026-06-01 (widened from a fixed
+	//     2000 low so warm Opus sessions stop reading yellow); default flipped
+	//     relative→absolute 2026-06-02.
 	//   - tps: tokens-per-second, higher = better. Post-TTFT decode rate is
 	//     mostly a model constant — Opus ~30-60, Sonnet ~80-130, Haiku
 	//     ~150-250 — so any single absolute pair paints one model class
@@ -181,6 +186,20 @@ export const DEFAULTS = {
 	// 4 finite samples (fresh session bootstrap). "absolute" → always use
 	// the statuslineTpsThresholdLow/High pair, ignoring the ring.
 	statuslineTpsCalibration: "relative",
+	// TTFT calibration. "absolute" (default) → use the
+	// statuslineTtftThresholdLowMs/HighMs pair as a fixed wall-clock budget,
+	// so green means a genuinely warm cache (the product's core signal).
+	// "relative" → derive the bands from the session's own recentTtftMs ring
+	// (median-anchored: low = median*1.5, high = median*3), falling back to
+	// the absolute pair until the ring has 3 finite samples. Relative makes
+	// color mean "fast/slow for THIS link" and suits a noisy connection, but
+	// it normalizes away a *consistently* cold cache (every turn slow ⇒ high
+	// median ⇒ still green), which is why it is NOT the default for a
+	// cache-warmth signal (operator-flagged 2026-06-02). Unlike tps (which
+	// anchors on peak, its good direction), relative ttft anchors on the
+	// median rather than the min so one tiny cached request can't drag the
+	// green cutoff down and paint every normal turn yellow.
+	statuslineTtftCalibration: "absolute",
 	// Optional shared-secret bearer for write requests against /<adminPathPrefix>/*.
 	// When non-empty, POST/DELETE/PATCH/PUT must carry `Authorization: Bearer <token>`
 	// unless the request originates from loopback (127.0.0.1, ::1, ::ffff:127.0.0.1).
@@ -578,6 +597,14 @@ function validate(c) {
 	) {
 		throw new Error(
 			`invalid statuslineTpsCalibration: ${JSON.stringify(c.statuslineTpsCalibration)} (must be "relative" | "absolute")`,
+		);
+	}
+	if (
+		typeof c.statuslineTtftCalibration !== "string" ||
+		!["relative", "absolute"].includes(c.statuslineTtftCalibration)
+	) {
+		throw new Error(
+			`invalid statuslineTtftCalibration: ${JSON.stringify(c.statuslineTtftCalibration)} (must be "relative" | "absolute")`,
 		);
 	}
 	if (

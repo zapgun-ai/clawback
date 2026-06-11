@@ -275,4 +275,42 @@ describe("extractClawbackArgs", () => {
 			/--remote requires a URL/,
 		);
 	});
+
+	test("--remote <url> is intercepted, NOT forwarded to claude", () => {
+		const r = extractClawbackArgs(
+			["--remote", "http://clawback.example:8888", "--other"],
+			{ mintFn },
+		);
+		expect(r.remoteUrl).toBe("http://clawback.example:8888");
+		expect(r.passthrough).toEqual(["--other"]);
+	});
+
+	test("--remote=<url> (equals form) also intercepted", () => {
+		const r = extractClawbackArgs(
+			["--remote=https://clawback.example:8888", "--keep"],
+			{ mintFn },
+		);
+		expect(r.remoteUrl).toBe("https://clawback.example:8888");
+		expect(r.passthrough).toEqual(["--keep"]);
+	});
+
+	test("default (no --remote) → remoteUrl is null", () => {
+		const r = extractClawbackArgs([], { mintFn });
+		expect(r.remoteUrl).toBeNull();
+	});
+
+	test("--remote without a value throws", () => {
+		expect(() => extractClawbackArgs(["--remote"], { mintFn })).toThrow(
+			/--remote requires a URL/,
+		);
+		expect(() =>
+			extractClawbackArgs(["--remote", "--next-flag"], { mintFn }),
+		).toThrow(/--remote requires a URL/);
+	});
+
+	test("--remote= (empty value) throws", () => {
+		expect(() => extractClawbackArgs(["--remote="], { mintFn })).toThrow(
+			/--remote requires a URL/,
+		);
+	});
 });

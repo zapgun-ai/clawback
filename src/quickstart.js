@@ -1,13 +1,17 @@
 import fs from "node:fs";
+import path from "node:path";
 import { parseFrontMatter, stringifyFrontMatter } from "./front_matter.js";
 import { generateAdminToken, initConfig } from "./init.js";
-import { setupStatusline } from "./setup_statusline.js";
+import {
+	resolveEffectiveStatusline,
+	resolveSettingsPath,
+	setupStatusline,
+} from "./setup_statusline.js";
 
 /**
  * `clawback quickstart` — one-command setup. Chains:
  *   1. `clawback init --local`         (create ./CLAWBACK.md if absent)
- *   2. overlay default-good knobs      (host=127.0.0.1, keepAliveModeExtended=true;
- *                                       lan=true swaps in host=0.0.0.0 + selfSign)
+ *   2. overlay default-good knobs      (keepAliveModeExtended=true)
  *   3. `clawback setup claude`         (wire the Claude Code statusline)
  *
  * The caller (bin/clawback.js) handles step 4 (`clawback claude`) by
@@ -21,13 +25,11 @@ import { setupStatusline } from "./setup_statusline.js";
  *   {
  *     init: { action: "created"|"overwrote"|"skipped"|"defaults-overlaid", targetPath, overlaidKeys: string[] },
  *     setup: { action: "created"|"overwrote"|"skipped", targetPath, reason?, command? },
- *     gitignore: { action: "created"|"added"|"already-present", added: string[] },
  *   }
  */
 export function runQuickstart({
 	force = false,
 	project = false,
-	lan = false,
 	cwd = process.cwd(),
 	env = process.env,
 	loadConfigFn,
@@ -43,14 +45,9 @@ export function runQuickstart({
 		configPath: null,
 		cwd,
 		env,
-		// quickstart always pre-ignores the adminToken-bearing CLAWBACK.md
-		// (and data/, logs/), creating .gitignore even when the directory
-		// isn't a git repo yet — so the secret can't be accidentally
-		// committed once it becomes one.
-		forceGitignore: true,
 	});
 
-	const overlay = applyDefaultGoodOverlay(initRaw.targetPath, { lan });
+	const overlay = applyDefaultGoodOverlay(initRaw.targetPath);
 
 	const peeked =
 		typeof loadConfigFn === "function" ? loadConfigFn().config : null;
@@ -60,10 +57,30 @@ export function runQuickstart({
 		adminPathPrefix ?? peeked?.adminPathPrefix ?? "_proxy";
 	const setupTls = tls || peeked?.tls === true;
 
+	// "Setup hasn't been run yet" — in the sense that matters — means
+	// clawback's statusline is NOT the block Claude Code will actually
+	// render. setupStatusline on its own refuses to overwrite ANY
+	// pre-existing statusLine without force, so a machine that already
+	// carries a custom (or stale/shadowed) statusLine would sail through
+	// quickstart with clawback's metrics statusline silently unwired.
+	// Detect the effective block up front and force the wire whenever it
+	// isn't already clawback's; an explicit --force still forces regardless.
+	const setupTargetPath = resolveSettingsPath({ project, cwd, env });
+	const effectiveBefore = resolveEffectiveStatusline({ cwd, env });
+	const targetEntryBefore = effectiveBefore.entries.find(
+		(e) => e.path && path.resolve(e.path) === path.resolve(setupTargetPath),
+	);
+	const targetWasForeign =
+		targetEntryBefore?.present === true &&
+		targetEntryBefore.isClawback === false;
+	const clawbackEffectiveBefore =
+		effectiveBefore.effective?.isClawback === true;
+	const setupForce = force || !clawbackEffectiveBefore;
+
 	const setupResult = setupStatusline({
 		settingsPath: null,
 		project,
-		force,
+		force: setupForce,
 		host: setupHost,
 		port: setupPort,
 		adminPathPrefix: setupAdminPrefix,
@@ -72,6 +89,19 @@ export function runQuickstart({
 		cwd,
 		env,
 	});
+
+	// After the wire, is clawback finally the effective block? If a foreign
+	// block at a HIGHER-precedence tier still shadows what we wrote, the
+	// wire took no visible effect — report that rather than claim success.
+	// (Writing one tier can't dislodge a shadow at another, and silently
+	// removing the operator's block at a tier we didn't target would be
+	// overreach — so we surface it for the operator to resolve.)
+	const effectiveAfter = resolveEffectiveStatusline({ cwd, env });
+	const shadowEntry =
+		setupResult.action !== "skipped" &&
+		effectiveAfter.effective?.isClawback !== true
+			? (effectiveAfter.effective ?? null)
+			: null;
 
 	return {
 		init: {
@@ -89,11 +119,20 @@ export function runQuickstart({
 			// implication.
 			adminTokenMinted: initRaw.adminToken != null || overlay.adminTokenMinted,
 		},
-		setup: setupResult,
-		// What `forceGitignore` did to ./.gitignore (created/added/
-		// already-present). The caller surfaces created/added so the
-		// operator knows the secret-bearing CLAWBACK.md is now ignored.
-		gitignore: initRaw.gitignore,
+		setup: {
+			...setupResult,
+			// We wired clawback because it wasn't already the effective
+			// block — i.e. setup "hadn't been run yet" (or --force).
+			rerun: !clawbackEffectiveBefore && setupResult.action !== "skipped",
+			// The wire displaced a non-clawback statusLine the operator had
+			// at the target tier (setupResult.previous holds the old block).
+			replacedForeign: setupResult.action === "overwrote" && targetWasForeign,
+			// A higher-precedence foreign block still shadows the wire; the
+			// statusline won't show clawback until that block is removed.
+			shadowedBy: shadowEntry
+				? { tier: shadowEntry.tier, path: shadowEntry.path }
+				: null,
+		},
 	};
 }
 
@@ -103,48 +142,35 @@ export function runQuickstart({
  * are preserved. The markdown body (everything after the front-matter
  * fence) is read and re-emitted verbatim, so the init doc-block survives.
  *
- * Default overlay (loopback, `lan=false`):
- *   - `host: "127.0.0.1"` — serve locally and securely by default. A
- *     loopback bind never leaves the machine, so no TLS/cert is needed:
- *     the dashboard opens over plain http:// with no browser warning,
- *     and the statusline curl is a trivial plain-HTTP request. This is
- *     the same host DEFAULTS already uses; we write it explicitly so the
- *     intent (and the safety boundary) is recorded in the file.
- *   - `keepAliveModeExtended: true` — pairs with the 1h cache TTL
- *     that's already on by default.
- *
- * LAN overlay (`lan=true`, i.e. `clawback quickstart --lan`):
- *   - `host: "0.0.0.0"` — binds for the laptop-runs-clawback /
- *     phone-views-dashboard flow. The LAN bind is safe only with a
- *     shared secret, so initConfig's auto-minted `adminToken` covers
- *     loadConfig.validate's non-loopback gate.
+ * Current default-good overlay:
+ *   - `host: "0.0.0.0"` — quickstart binds for the laptop-runs-clawback /
+ *     phone-views-dashboard flow; loopback would block that. The LAN
+ *     bind is safe only with a shared secret, so the overlay also mints
+ *     an `adminToken` when the file lacks one (loadConfig.validate
+ *     refuses non-loopback bind + no token). Standalone `clawback
+ *     claude` (no config) still defaults to 127.0.0.1 via DEFAULTS, so
+ *     the safety boundary remains for non-quickstart paths.
  *   - `selfSign: true` — the 0.0.0.0 bind triggers loadConfig's
  *     open-network TLS auto-enable, so the proxy needs a cert. selfSign
- *     lets `start()` mint a self-signed pair on first launch as a
- *     fallback; the CLI prefers a browser-trusted mkcert cert when
- *     mkcert is available (see bin/clawback.js).
- *   - `keepAliveModeExtended: true` — as above.
+ *     lets `start()` mint a self-signed pair on first launch instead of
+ *     refusing to boot, keeping quickstart a true one-command flow. The
+ *     locally-spawned claude trusts it automatically via
+ *     NODE_EXTRA_CA_CERTS; a phone/other-host client must trust the
+ *     self-signed CA out of band (or the operator swaps in a real cert
+ *     and drops this flag).
+ *   - `keepAliveModeExtended: true` — pairs with the 1h cache TTL
+ *     that's already on by default.
+ * The other MVP knobs are already defaulted correctly in DEFAULTS.
  *
- * In both modes the auto-minted `adminToken` (written by initConfig on
- * create) is preserved. The other MVP knobs are already defaulted
- * correctly in DEFAULTS.
- *
- * @param {string} targetPath
- * @param {{lan?: boolean}} [opts]  lan=true selects the 0.0.0.0 + selfSign overlay.
  * @returns {{overlaidKeys: string[], adminTokenMinted: boolean}}
  */
-export function applyDefaultGoodOverlay(targetPath, { lan = false } = {}) {
+export function applyDefaultGoodOverlay(targetPath) {
 	const overlaidKeys = [];
-	const wantedDefaults = lan
-		? {
-				host: "0.0.0.0",
-				selfSign: true,
-				keepAliveModeExtended: true,
-			}
-		: {
-				host: "127.0.0.1",
-				keepAliveModeExtended: true,
-			};
+	const wantedDefaults = {
+		host: "0.0.0.0",
+		selfSign: true,
+		keepAliveModeExtended: true,
+	};
 
 	let raw = "";
 	try {
@@ -183,18 +209,15 @@ export function applyDefaultGoodOverlay(targetPath, { lan = false } = {}) {
 		}
 	}
 	if (mutated) {
-		// Tighten perms BEFORE writing the token in: initConfig set 0o600
-		// on creation, but a pre-existing operator file may be mode 644,
-		// and chmod-after would leave the freshly written secret
-		// world-readable for the window between write and chmod.
+		fs.writeFileSync(targetPath, stringifyFrontMatter(parsed, body));
+		// Re-tighten perms: the file now (always) carries a shared secret.
+		// initConfig set 0o600 on creation, but a pre-existing operator
+		// file may be mode 644; the overlay just wrote a token into it.
 		try {
 			fs.chmodSync(targetPath, 0o600);
 		} catch {
 			/* non-POSIX FS or insufficient perms */
 		}
-		fs.writeFileSync(targetPath, stringifyFrontMatter(parsed, body), {
-			mode: 0o600,
-		});
 	}
 	return { overlaidKeys, adminTokenMinted };
 }

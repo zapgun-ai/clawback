@@ -7,6 +7,7 @@ import {
 	buildBaseUrl,
 	launchClaude,
 	normalizeRemoteUrl,
+	resolveCommandOnPath,
 } from "../src/launch_claude.js";
 
 let cwd;
@@ -44,6 +45,39 @@ test("buildBaseUrl rewrites bind-only wildcards to loopback", () => {
 	expect(buildBaseUrl({ host: "::", port: 8080 })).toBe(
 		"http://127.0.0.1:8080",
 	);
+});
+
+test("resolveCommandOnPath finds executable files and skips everything else", () => {
+	const bin = path.join(cwd, "bin");
+	fs.mkdirSync(bin);
+	const exe = path.join(bin, "claude");
+	fs.writeFileSync(exe, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	fs.writeFileSync(path.join(bin, "not-exec"), "data", { mode: 0o644 });
+	fs.mkdirSync(path.join(bin, "a-dir"), { mode: 0o755 });
+	const env = {
+		PATH: [path.join(cwd, "missing"), bin].join(path.delimiter),
+	};
+	expect(resolveCommandOnPath("claude", env)).toBe(exe);
+	expect(resolveCommandOnPath("not-exec", env)).toBe(null);
+	expect(resolveCommandOnPath("a-dir", env)).toBe(null);
+	expect(resolveCommandOnPath("absent", env)).toBe(null);
+	expect(resolveCommandOnPath(exe, env)).toBe(exe);
+	expect(resolveCommandOnPath("claude", { PATH: "" })).toBe(null);
+});
+
+test("launchClaude rejects with install instructions when claude is not on PATH", async () => {
+	const emptyBin = path.join(cwd, "empty-bin");
+	fs.mkdirSync(emptyBin);
+	const env = { HOME: cwd, PATH: emptyBin };
+	await expect(
+		launchClaude({ cwd, env, stdinIsTty: false, stdoutIsTty: false }),
+	).rejects.toThrow(/`claude` not found on PATH/);
+	await expect(
+		launchClaude({ cwd, env, stdinIsTty: false, stdoutIsTty: false }),
+	).rejects.toThrow(/claude\.ai\/install\.sh/);
+	await expect(
+		launchClaude({ cwd, env, stdinIsTty: false, stdoutIsTty: false }),
+	).rejects.toThrow(/@anthropic-ai\/claude-code/);
 });
 
 test("launchClaude spawns claude with ANTHROPIC_BASE_URL set from defaults", async () => {

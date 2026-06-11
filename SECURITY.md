@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report privately vi [hello@clawback.md](mailto:hello@clawback.md) rather
+Please report privately via [hello@clawback.md](mailto:hello@clawback.md) rather
 than opening a public issue. Reports get a response within a few days; please
 leave time for a fix before public disclosure. Only the latest release is
 supported for security fixes.
@@ -68,4 +68,4 @@ For exposure beyond a trusted LAN, the recommended posture is
 **don't**: keep the bind on loopback and tunnel via Tailscale,
 WireGuard, or an SSH port-forward. The token model was designed for
 `homelab.local` on your own Wi-Fi, not for a public IP. See
-"Securing a non-loopback bind" in the README.
+"Privacy & Security" in the README.

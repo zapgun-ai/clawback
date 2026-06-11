@@ -280,7 +280,7 @@ test("the card bakes the win + the honest context into the image, and links to X
 	// a solid field — the graph-splice path has its own test below.)
 	const svg = cardSvg(doc);
 	expect(svg).toContain("+97%"); // signed headline: a win leads with "+"
-	expect(svg).toContain("professional tokenmaxxing"); // a win wears the brand line
+	expect(svg).toContain("professional claude tokenmaxxing"); // a win wears the brand line
 	expect(svg).not.toContain("<image");
 	expect(svg).toContain('fill="#0b0f14"');
 

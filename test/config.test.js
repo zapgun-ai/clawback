@@ -726,6 +726,11 @@ describe("statusline color thresholds", () => {
 		expect(config.statuslineTpsThresholdLow).toBe(15);
 		expect(config.statuslineTpsThresholdHigh).toBe(40);
 		expect(config.statuslineTpsCalibration).toBe("relative");
+		// ttft defaults to ABSOLUTE: it's clawback's cache-warmth signal, and
+		// relative calibration masks a consistently-cold cache (flipped
+		// relative→absolute 2026-06-02). tps stays relative (decode rate is a
+		// model/hardware constant, not the product signal).
+		expect(config.statuslineTtftCalibration).toBe("absolute");
 	});
 
 	test("CLI override propagates each knob", () => {
@@ -861,6 +866,33 @@ describe("statusline color thresholds", () => {
 					env: isolatedEnv(),
 				}),
 			).toThrow(/statuslineTpsCalibration/);
+		}
+	});
+
+	test("statuslineTtftCalibration accepts 'relative' or 'absolute'", () => {
+		const { config: relative } = loadConfig({
+			cliOverrides: { statuslineTtftCalibration: "relative" },
+			cwd: tmpDir,
+			env: isolatedEnv(),
+		});
+		expect(relative.statuslineTtftCalibration).toBe("relative");
+		const { config: absolute } = loadConfig({
+			cliOverrides: { statuslineTtftCalibration: "absolute" },
+			cwd: tmpDir,
+			env: isolatedEnv(),
+		});
+		expect(absolute.statuslineTtftCalibration).toBe("absolute");
+	});
+
+	test("statuslineTtftCalibration rejects bogus values", () => {
+		for (const bad of ["RELATIVE", "auto", "", null, 1, true]) {
+			expect(() =>
+				loadConfig({
+					cliOverrides: { statuslineTtftCalibration: bad },
+					cwd: tmpDir,
+					env: isolatedEnv(),
+				}),
+			).toThrow(/statuslineTtftCalibration/);
 		}
 	});
 });

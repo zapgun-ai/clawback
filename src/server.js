@@ -1181,7 +1181,7 @@ function warnCanaryOnce(canaryGuard, logger) {
 			"(re-serializing would change the forwarded bytes, e.g. de-escaping \\uXXXX). " +
 			"Forwarding the PRISTINE body and SKIPPING the cache knobs (strip-ephemeral / 1h-TTL / 5m-strip) " +
 			"so we don't cold-start Anthropic's prompt cache. If you see this with real Claude Code, " +
-			"capture a body (--capture-body) and inspect what the client sent. This warns once per process.",
+			"capture a body and investigate (TEST.md byte-faithfulness). This warns once per process.",
 	);
 }
 
