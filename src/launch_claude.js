@@ -128,6 +128,7 @@ export async function launchClaude({
 	rows = process.stdout.rows,
 	clawbackId = null,
 	label = null,
+	autoLabel = false,
 	remoteUrl = null,
 } = {}) {
 	// Preflight: fail with install instructions instead of an opaque async
@@ -157,13 +158,18 @@ export async function launchClaude({
 	const childEnv = { ...env, ANTHROPIC_BASE_URL: baseUrl };
 	// PLAN §39: propagate the per-session id and bare proxy URL to the
 	// spawned claude so its statusline command (configured by
-	// `clawback setup statusline`) can curl the right per-session
+	// `clawback setup claude`) can curl the right per-session
 	// endpoint via env-var expansion. Without these, the statusline
 	// command falls back to the legacy aggregate `/_proxy/statusline`.
 	if (clawbackId) {
 		childEnv.CLAWBACK_PROXY_URL = proxyUrl;
 		childEnv.CLAWBACK_SESSION_ID = clawbackId;
 		if (label) childEnv.CLAWBACK_SESSION_LABEL = label;
+		// Signals the baked statusline command to attach the live git branch as
+		// an `x-clawback-branch` header (so the line tracks mid-session branch
+		// switches). Set ONLY for the git-derived default label — an operator
+		// `--label` is a deliberate fixed name that must not be branch-rewritten.
+		if (autoLabel) childEnv.CLAWBACK_AUTOLABEL = "1";
 	}
 
 	// When clawback is serving TLS with a self-signed cert, point the spawned

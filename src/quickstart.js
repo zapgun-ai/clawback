@@ -143,32 +143,30 @@ export function runQuickstart({
  * fence) is read and re-emitted verbatim, so the init doc-block survives.
  *
  * Current default-good overlay:
- *   - `host: "0.0.0.0"` — quickstart binds for the laptop-runs-clawback /
- *     phone-views-dashboard flow; loopback would block that. The LAN
- *     bind is safe only with a shared secret, so the overlay also mints
- *     an `adminToken` when the file lacks one (loadConfig.validate
- *     refuses non-loopback bind + no token). Standalone `clawback
- *     claude` (no config) still defaults to 127.0.0.1 via DEFAULTS, so
- *     the safety boundary remains for non-quickstart paths.
- *   - `selfSign: true` — the 0.0.0.0 bind triggers loadConfig's
- *     open-network TLS auto-enable, so the proxy needs a cert. selfSign
- *     lets `start()` mint a self-signed pair on first launch instead of
- *     refusing to boot, keeping quickstart a true one-command flow. The
- *     locally-spawned claude trusts it automatically via
- *     NODE_EXTRA_CA_CERTS; a phone/other-host client must trust the
- *     self-signed CA out of band (or the operator swaps in a real cert
- *     and drops this flag).
  *   - `keepAliveModeExtended: true` — pairs with the 1h cache TTL
  *     that's already on by default.
- * The other MVP knobs are already defaulted correctly in DEFAULTS.
+ *
+ * Deliberately does NOT set `host` or `selfSign`. quickstart runs on the
+ * loopback default (127.0.0.1 via DEFAULTS) over plain HTTP — the
+ * dashboard opens at http://127.0.0.1:<port>/… with no self-signed-cert
+ * browser warning. Forcing `host: 0.0.0.0` here used to trip loadConfig's
+ * open-network TLS auto-enable, which served the dashboard over HTTPS with
+ * a self-signed cert — a security warning on the very first screen. An
+ * operator who wants LAN/phone access opts in by setting `host` themselves
+ * and running `clawback claude` directly (non-quickstart keeps the TLS
+ * auto-enable); quickstart itself is loopback + cleartext by design.
+ *
+ * The token-mint below still fires whenever the resulting config lacks an
+ * `adminToken`, so a pre-existing operator config that DOES open a
+ * non-loopback bind stays paired with a shared secret (loadConfig.validate
+ * refuses non-loopback + no token). The other MVP knobs are already
+ * defaulted correctly in DEFAULTS.
  *
  * @returns {{overlaidKeys: string[], adminTokenMinted: boolean}}
  */
 export function applyDefaultGoodOverlay(targetPath) {
 	const overlaidKeys = [];
 	const wantedDefaults = {
-		host: "0.0.0.0",
-		selfSign: true,
 		keepAliveModeExtended: true,
 	};
 
@@ -185,12 +183,14 @@ export function applyDefaultGoodOverlay(targetPath) {
 	const { data: parsed, body } =
 		raw.trim().length > 0 ? parseFrontMatter(raw) : { data: {}, body: "" };
 
-	// Mint an adminToken when missing so the host=0.0.0.0 overlay can land
-	// without tripping loadConfig.validate's LAN-bind safety gate. On a
-	// fresh quickstart, initConfig already wrote the token; this branch
-	// covers the pre-existing tokenless config case where initConfig
-	// returned `skipped`. The token is appended to the existing file,
-	// preserving every other key the operator set.
+	// Mint an adminToken when missing so a config that opens a non-loopback
+	// bind stays paired with a shared secret (loadConfig.validate refuses
+	// non-loopback + no token). On a fresh quickstart, initConfig already
+	// wrote the token; this branch covers the pre-existing tokenless config
+	// case where initConfig returned `skipped`. The token is appended to the
+	// existing file, preserving every other key the operator set. (Harmless
+	// on the loopback default, where admin auth is loopback-exempt and the
+	// token simply goes unused until the operator widens the bind.)
 	let mutated = false;
 	let adminTokenMinted = false;
 	const hasFileAdminToken =

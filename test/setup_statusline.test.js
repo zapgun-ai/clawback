@@ -211,7 +211,12 @@ describe("setupStatusline", () => {
 			remoteUrl: "http://remoteclawback.ca:8888",
 		});
 		const contents = JSON.parse(fs.readFileSync(r.targetPath, "utf8"));
-		expect(contents.statusLine.command).toMatch(/curl -sf -L --data-binary/);
+		// `-L` is present (follow the TLS upgrade) and `--data-binary` is the
+		// body flag; the optional `${b:+-H x-clawback-branch:...}` branch header
+		// may sit between them, so don't require adjacency. The key assertion is
+		// that an http remote adds no `-k`.
+		expect(contents.statusLine.command).toMatch(/curl -sf -L /);
+		expect(contents.statusLine.command).toMatch(/--data-binary @-/);
 		expect(contents.statusLine.command).not.toMatch(/ -k /);
 	});
 

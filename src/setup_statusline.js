@@ -2,9 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * `clawback setup statusline` — write a statusLine block into the
- * operator's Claude Code settings so the statusline pulls clawback's
- * `/_proxy/statusline` endpoint with claude's session data POSTed.
+ * The `clawback setup claude` command (CLI target is `claude`, NOT
+ * `statusline` — this function is named for what it writes, not how it's
+ * invoked) — write a statusLine block into the operator's Claude Code settings
+ * so the statusline pulls clawback's `/_proxy/statusline` endpoint with
+ * claude's session data POSTed. Run `clawback setup claude --force` to
+ * overwrite an existing block.
  *
  * Settings file shape per Claude Code docs:
  *   { "statusLine": { "type": "command", "command": "..." } }
@@ -64,7 +67,19 @@ export function setupStatusline({
 	// var if set, else the literal default. Same for the session id —
 	// _default is a router-reserved sentinel that routes to the legacy
 	// no-id path on the server side.
-	const command = `bash -c 'curl -sf ${follow}${insecure}--data-binary @- "\${CLAWBACK_PROXY_URL:-${defaultBase}}${defaultPath}/\${CLAWBACK_SESSION_ID:-_default}" || true'`;
+	//
+	// Per-render label self-heal + branch refresh. The spawned claude's env
+	// carries CLAWBACK_SESSION_LABEL (the launch `[host:]repo:branch` base) and,
+	// for git-auto labels, CLAWBACK_AUTOLABEL=1. We re-send the label EVERY
+	// render so it survives a proxy restart, and for auto labels also resolve
+	// the CURRENT git branch (detached HEAD → @<short-sha>) so the line tracks a
+	// mid-session `git checkout` (the server swaps the branch segment + keeps a
+	// uniqueness index). Headers go through a bash array so a value with a space
+	// (e.g. a repo dir name with a space) stays one argument. All git calls are
+	// best-effort (`|| true`); a missing git or non-repo cwd just yields no
+	// branch header. An operator `--label` session sets CLAWBACK_SESSION_LABEL
+	// but NOT CLAWBACK_AUTOLABEL, so it self-heals verbatim with no git cost.
+	const command = `bash -c 'h=(); if [ -n "\${CLAWBACK_AUTOLABEL:-}" ]; then h+=(-H "x-clawback-autolabel:1"); b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true); [ "$b" = HEAD ] && b="@$(git rev-parse --short HEAD 2>/dev/null || true)"; [ -n "$b" ] && h+=(-H "x-clawback-branch:$b"); fi; [ -n "\${CLAWBACK_SESSION_LABEL:-}" ] && h+=(-H "x-clawback-label:\${CLAWBACK_SESSION_LABEL}"); curl -sf ${follow}${insecure}"\${h[@]}" --data-binary @- "\${CLAWBACK_PROXY_URL:-${defaultBase}}${defaultPath}/\${CLAWBACK_SESSION_ID:-_default}" || true'`;
 	const block = { type: "command", command };
 
 	let existing = {};

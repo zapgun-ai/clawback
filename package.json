@@ -1,6 +1,6 @@
 {
 	"name": "@zapgun/clawback",
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"description": "Tokenmaxxing for Claude Code.",
 	"type": "module",
 	"publishConfig": {

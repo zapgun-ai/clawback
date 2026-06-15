@@ -1210,6 +1210,47 @@ describe("open-network bind defaults TLS on", () => {
 	});
 });
 
+// CLAWBACK_DISABLE_TLS=1 is the hard escape hatch `clawback quickstart`
+// sets so the first-run dashboard always opens over plain HTTP — no
+// self-signed-cert browser warning — even when the operator's config would
+// otherwise serve HTTPS. It wins over the open-network auto-enable AND an
+// explicit file/CLI `tls: true`.
+describe("CLAWBACK_DISABLE_TLS forces TLS off", () => {
+	test("suppresses the open-network auto-enable on a non-loopback bind", () => {
+		const { config } = loadConfig({
+			cliOverrides: { host: "0.0.0.0", adminToken: "t" },
+			env: isolatedEnv({ CLAWBACK_DISABLE_TLS: "1" }),
+		});
+		expect(config.tls).toBe(false);
+		// Forced off counts as an explicit choice, so the auto marker is absent.
+		expect(config._tlsAutoEnabled).toBeUndefined();
+	});
+
+	test("overrides an explicit tls:true set in a config file", () => {
+		const env = isolatedEnv({ CLAWBACK_DISABLE_TLS: "1" });
+		writeGlobal(env, { host: "0.0.0.0", adminToken: "t", tls: true });
+		const { config } = loadConfig({ cwd: tmpDir, env });
+		expect(config.tls).toBe(false);
+	});
+
+	test("overrides an explicit tls:true passed as a CLI override", () => {
+		const { config } = loadConfig({
+			cliOverrides: { host: "0.0.0.0", adminToken: "t", tls: true },
+			env: isolatedEnv({ CLAWBACK_DISABLE_TLS: "1" }),
+		});
+		expect(config.tls).toBe(false);
+	});
+
+	test('only the exact value "1" triggers it (auto-enable otherwise intact)', () => {
+		const { config } = loadConfig({
+			cliOverrides: { host: "0.0.0.0", adminToken: "t" },
+			env: isolatedEnv({ CLAWBACK_DISABLE_TLS: "0" }),
+		});
+		expect(config.tls).toBe(true);
+		expect(config._tlsAutoEnabled).toBe(true);
+	});
+});
+
 // Audit M2: a CLAWBACK.md containing adminToken at world-readable
 // perms leaks the shared secret to any local user. loadConfig surfaces
 // this as a `warnings` entry so start() can log it loudly.

@@ -662,6 +662,54 @@ test("sessions table renders one row per session from /_proxy/sessions", async (
 	teardown(dom);
 });
 
+test("sessions table shows the friendly label with the short-code chip beside it", async () => {
+	const routes = {
+		...defaultRoutes(),
+		"/_proxy/sessions": {
+			count: 2,
+			sessions: [
+				// A git-derived label (differs from the key) → show both.
+				{
+					key: "a1b2c3d4",
+					label: "clawback:main",
+					labelSource: "auto",
+					mode: "path",
+				},
+				// No registered label → publicSession returns label == key.
+				{
+					key: "e5f6a7b8",
+					label: "e5f6a7b8",
+					labelSource: "auto",
+					mode: "path",
+				},
+			],
+		},
+	};
+	const dom = bootUi({ fetchImpl: makeFetch(routes) });
+	await settle(dom);
+	const doc = dom.window.document;
+	const rowByKey = (k) =>
+		Array.from(doc.querySelectorAll("#sessionsTableBody tr")).find(
+			(r) => r.dataset.sessionKey === k,
+		);
+
+	// Friendly label present: the label name AND the muted key chip render.
+	const labeled = rowByKey("a1b2c3d4");
+	expect(labeled.querySelector(".session-label-name").textContent).toBe(
+		"clawback:main",
+	);
+	expect(labeled.querySelector(".session-code").textContent).toBe("a1b2c3d4");
+
+	// Label is just the key: don't render a duplicate chip.
+	const bare = rowByKey("e5f6a7b8");
+	expect(bare.querySelector(".session-label-name").textContent).toBe(
+		"e5f6a7b8",
+	);
+	expect(bare.querySelector(".session-code")).toBeNull();
+
+	teardown(dom);
+});
+
 test("each chart renders per-session paths plus the aggregate line", async () => {
 	const dom = bootUi({ fetchImpl: makeFetch(twoSessionRoutes()) });
 	await settle(dom);

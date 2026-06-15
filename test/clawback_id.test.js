@@ -54,6 +54,13 @@ describe("validateLabel", () => {
 		expect(() => validateLabel(":nohost")).toThrow();
 	});
 
+	test("allows '@' (subsequent only) for the detached-HEAD auto label", () => {
+		// computeDefaultSessionLabel mints `<repo>:@<short-sha>` for a detached
+		// HEAD; the server gate must accept it. Not valid as the first char.
+		expect(validateLabel("clawback:@a1b2c3d")).toBe("clawback:@a1b2c3d");
+		expect(() => validateLabel("@head")).toThrow();
+	});
+
 	test("rejects path-unsafe and control chars", () => {
 		expect(() => validateLabel("with/slash")).toThrow();
 		expect(() => validateLabel("with\nnewline")).toThrow();

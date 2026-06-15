@@ -199,6 +199,37 @@ describe("POST /_proxy/sessions/<id> with {label}", () => {
 			teardown(ctx);
 		}
 	});
+
+	test("source:auto seeds a git label with a uniqueness index appended", async () => {
+		const ctx = setup();
+		const port = await listen(ctx.server);
+		try {
+			const a = await jsonReq(port, "/_proxy/sessions/sA", "POST", {
+				label: "clawback:main",
+				source: "auto",
+			});
+			expect(a.status).toBe(200);
+			expect(a.body.label).toBe("clawback:main:0");
+			expect(a.body.labelSource).toBe("auto");
+			expect(a.body.labelBase).toBe("clawback:main");
+			expect(a.body.labelIndex).toBe(0);
+			// A second session on the same base seeds index 1.
+			const b = await jsonReq(port, "/_proxy/sessions/sB", "POST", {
+				label: "clawback:main",
+				source: "auto",
+			});
+			expect(b.body.label).toBe("clawback:main:1");
+			expect(b.body.labelIndex).toBe(1);
+			// Re-seeding the same session keeps its index stable.
+			const aAgain = await jsonReq(port, "/_proxy/sessions/sA", "POST", {
+				label: "clawback:main",
+				source: "auto",
+			});
+			expect(aAgain.body.label).toBe("clawback:main:0");
+		} finally {
+			teardown(ctx);
+		}
+	});
 });
 
 describe("GET /_proxy/sessions enrichment", () => {

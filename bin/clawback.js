@@ -27,6 +27,7 @@ import { probeClawback } from "../src/probe.js";
 import * as ptyCallbackServer from "../src/pty_callback_server.js";
 import { runQuickstart } from "../src/quickstart.js";
 import { setRemoteUrl } from "../src/remote.js";
+import { computeDefaultSessionLabel } from "../src/session_label.js";
 import {
 	detectStatuslineTierConflicts,
 	setupStatusline,
@@ -60,7 +61,13 @@ async function runClaudeChild(result, { logger }) {
  * `--remote` so the label POST goes to the remote clawback's admin
  * endpoint, not to the local config's host:port.
  */
-async function postSessionLabel(config, clawbackId, label, proxyUrl = null) {
+async function postSessionLabel(
+	config,
+	clawbackId,
+	label,
+	proxyUrl = null,
+	source = "operator",
+) {
 	if (!label) return;
 	const baseUrl = proxyUrl ?? buildBaseUrl(config);
 	const url = `${baseUrl}/${config.adminPathPrefix}/sessions/${clawbackId}`;
@@ -72,7 +79,11 @@ async function postSessionLabel(config, clawbackId, label, proxyUrl = null) {
 		await fetch(url, {
 			method: "POST",
 			headers,
-			body: JSON.stringify({ label }),
+			// `source: "auto"` tells the proxy to append a uniqueness index and
+			// track this as a git-auto label the per-render self-heal can refresh;
+			// "operator" stores the explicit `--label` verbatim. This is only a
+			// seed — the statusline render re-asserts the label every tick.
+			body: JSON.stringify({ label, source }),
 		});
 	} catch {
 		/* best-effort — see jsdoc */
@@ -282,12 +293,15 @@ Behavior:
 
     --label <name>    Human-readable label for this session, shown in the
                       web UI's session filter. 1-64 chars; letters, digits,
-                      dot, underscore, hyphen, internal space. Optional.
-                      Default: the clawback id. With --remote (or a
-                      configured remoteUrl) the registered label is
-                      prefixed with this machine's hostname (e.g.
-                      "alexmac:<label-or-id>") so sessions from different
-                      machines stay distinguishable in one shared
+                      dot, underscore, hyphen, colon, at-sign, internal
+                      space. Optional. Default: "<repo>:<branch>" derived
+                      from the launch directory's git context (e.g.
+                      "clawback:main"; worktrees share the repo name and
+                      differ by branch), or the directory name outside a
+                      git repo. With --remote (or a configured remoteUrl)
+                      the registered label is prefixed with this machine's
+                      hostname (e.g. "alexmac:<label>") so sessions from
+                      different machines stay distinguishable in one shared
                       dashboard. A local proxy shows the bare label.
     --remote <url>    Point the spawned claude at a clawback running
                       elsewhere (e.g. http://clawback.example.com:8888).
@@ -313,7 +327,7 @@ Behavior:
   id is minted. The id appears in \`ANTHROPIC_BASE_URL\` as a path
   component (e.g. http://127.0.0.1:8080/a3f9b2c1), and is exposed to the
   spawned claude via CLAWBACK_SESSION_ID + CLAWBACK_PROXY_URL env vars.
-  The statusline command (configured by \`clawback setup statusline\`)
+  The statusline command (configured by \`clawback setup claude\`)
   uses those vars to POST to /_proxy/statusline/<id>.
 
   Stdio is inherited.
@@ -367,24 +381,41 @@ Tip:
 	// proxy doesn't have to re-paste the URL every launch.
 	const effectiveRemoteUrl = remoteUrl ?? peekedConfig.remoteUrl ?? null;
 
+	// When the operator didn't pass `--label`, default the human-facing label
+	// to `<repo>:<branch>` from the launch directory's git context (e.g.
+	// `clawback:main`), so the statusline + dashboard show something legible
+	// instead of the raw session key. The clawback id stays the unique key;
+	// this only drives display/registration. Worktree-aware: all worktrees of
+	// a repo share the `<repo>` segment, branch distinguishes them (see
+	// src/session_label.js). Null when there's nothing usable — display then
+	// falls back to the key, the pre-existing behavior.
+	const effectiveLabel =
+		clawbackLabel ??
+		computeDefaultSessionLabel({ cwd: process.cwd(), env: process.env });
+	// True when the label is the git-derived default (no operator `--label`):
+	// only then does the statusline command refresh the branch per render.
+	const labelAuto = clawbackLabel == null && effectiveLabel != null;
+	// The label-record source the proxy stores: an auto (git-derived) label is
+	// indexed + branch-refreshed per render; an operator `--label` is verbatim.
+	const labelSource = labelAuto ? "auto" : "operator";
+
 	// Origin-host prefix for the session-record label, gated on remote.
 	// The prefix (`alexmac:<label-or-id>`) earns its keep only when this
 	// machine reports into a clawback that *other* machines also report
 	// into — i.e. a `--remote` (or configured remoteUrl) launch — so the
 	// shared dashboard can attribute each session to its origin host. For
 	// a local proxy the dashboard only ever shows this machine's sessions,
-	// so the prefix is pure noise that buries the operator's chosen label;
-	// there we record the bare `--label` (and post nothing when it's
-	// absent, letting the UI fall back to the clawback id). `recordLabel`
-	// feeds postSessionLabel only; the spawned claude's CLAWBACK_SESSION_LABEL
-	// env always carries the operator's raw --label regardless of mode.
+	// so the prefix is pure noise that buries the chosen label; there we
+	// record the bare label. `recordLabel` feeds postSessionLabel only; the
+	// spawned claude's CLAWBACK_SESSION_LABEL env carries `effectiveLabel`
+	// (operator `--label`, else the git-derived default) regardless of mode.
 	let recordLabel;
 	if (effectiveRemoteUrl != null) {
 		const originHost = sanitizeHostSegment(os.hostname());
-		const base = clawbackLabel ?? clawbackId;
+		const base = effectiveLabel ?? clawbackId;
 		recordLabel = originHost ? composeSessionLabel(originHost, base) : base;
 	} else {
-		recordLabel = clawbackLabel;
+		recordLabel = effectiveLabel;
 	}
 
 	if (effectiveRemoteUrl != null) {
@@ -394,7 +425,8 @@ Tip:
 				args: passthrough,
 				config: peekedConfig,
 				clawbackId,
-				label: clawbackLabel,
+				label: effectiveLabel,
+				autoLabel: labelAuto,
 				remoteUrl: effectiveRemoteUrl,
 			});
 		} catch (e) {
@@ -405,7 +437,7 @@ Tip:
 		const remoteSource = remoteUrl != null ? "cli" : "config";
 		process.stderr.write(
 			`clawback claude: spawned claude (${mode}) -> ${launchedBaseUrl} [session=${clawbackId}${
-				clawbackLabel ? `, label=${clawbackLabel}` : ""
+				effectiveLabel ? `, label=${effectiveLabel}` : ""
 			}, source=${clawbackIdSource}, remote=${remoteSource}]\n`,
 		);
 		await postSessionLabel(
@@ -413,8 +445,15 @@ Tip:
 			clawbackId,
 			recordLabel,
 			result.proxyUrl,
+			labelSource,
 		);
-		await postSessionLabel(peekedConfig, clawbackId, clawbackLabel);
+		await postSessionLabel(
+			peekedConfig,
+			clawbackId,
+			effectiveLabel,
+			null,
+			labelSource,
+		);
 		const noopLogger = {
 			info: () => {},
 			warn: () => {},
@@ -473,7 +512,8 @@ Tip:
 				args: passthrough,
 				config: peekedConfig,
 				clawbackId,
-				label: clawbackLabel,
+				label: effectiveLabel,
+				autoLabel: labelAuto,
 			});
 		} catch (e) {
 			process.stderr.write(`clawback claude: ${e.message}\n`);
@@ -482,10 +522,16 @@ Tip:
 		const { mode, baseUrl: launchedBaseUrl } = result;
 		process.stderr.write(
 			`clawback claude: spawned claude (${mode}) -> ${launchedBaseUrl} [session=${clawbackId}${
-				clawbackLabel ? `, label=${clawbackLabel}` : ""
+				effectiveLabel ? `, label=${effectiveLabel}` : ""
 			}, source=${clawbackIdSource}]\n`,
 		);
-		await postSessionLabel(peekedConfig, clawbackId, recordLabel);
+		await postSessionLabel(
+			peekedConfig,
+			clawbackId,
+			recordLabel,
+			null,
+			labelSource,
+		);
 
 		// PLAN §30: reverse channel for cross-process attach. When we
 		// got a PTY *and* the proxy is on this machine, stand up a
@@ -507,8 +553,8 @@ Tip:
 					config: peekedConfig,
 					callbackUrl: callbackServer.url,
 					token: callbackServer.token,
-					label: clawbackLabel
-						? `claude-remote:${clawbackLabel}`
+					label: effectiveLabel
+						? `claude-remote:${effectiveLabel}`
 						: `claude-remote:${clawbackId}`,
 				});
 				if (!reg.ok) {
@@ -577,7 +623,8 @@ Tip:
 			args: passthrough,
 			config,
 			clawbackId,
-			label: clawbackLabel,
+			label: effectiveLabel,
+			autoLabel: labelAuto,
 		});
 	} catch (e) {
 		process.stderr.write(`clawback claude: ${e.message}\n`);
@@ -593,10 +640,10 @@ Tip:
 		const { mode, baseUrl } = result;
 		logger.info(
 			`spawned claude (${mode}) with ANTHROPIC_BASE_URL=${baseUrl} [session=${clawbackId}${
-				clawbackLabel ? `, label=${clawbackLabel}` : ""
+				effectiveLabel ? `, label=${effectiveLabel}` : ""
 			}, source=${clawbackIdSource}]`,
 		);
-		await postSessionLabel(config, clawbackId, recordLabel);
+		await postSessionLabel(config, clawbackId, recordLabel, null, labelSource);
 
 		const exitCode = await runClaudeChild(result, { logger });
 		await shutdown(`claude exited (code=${exitCode})`, exitCode);
@@ -1068,7 +1115,7 @@ Usage:
 Behavior:
   Sets up clawback with a default-good config and launches claude:
     1. clawback init --local        (creates ./CLAWBACK.md if absent)
-    2. overlays default-good knobs  (host=0.0.0.0, keepAliveModeExtended=true)
+    2. overlays default-good knobs  (keepAliveModeExtended=true)
     3. clawback setup claude        (wires the Claude Code statusline)
     4. clawback claude --label clawback
                                     (launches claude pointed at clawback;
@@ -1077,11 +1124,14 @@ Behavior:
     5. opens the dashboard in your default browser once the proxy is
        reachable (suppress with CLAWBACK_NO_OPEN_BROWSER=1)
 
-  The host=0.0.0.0 overlay also mints an adminToken into the config
-  when one is missing, so the LAN bind is always paired with a shared
-  secret. Mutating endpoints are bearer-gated; GETs stay open and
-  expose session metadata to the LAN — see README "Securing a
-  non-loopback bind".
+  quickstart runs on loopback over plain HTTP — no TLS — so the dashboard
+  opens at http://127.0.0.1:<port>/… with no browser security warning.
+  TLS is force-disabled for quickstart even if your CLAWBACK.md sets
+  tls:true or a non-loopback host (which would normally auto-enable TLS);
+  if it does bind non-loopback, the dashboard + captured credentials cross
+  the LAN in cleartext and quickstart prints a warning. Want HTTPS / LAN
+  access? Run \`clawback claude\` directly (non-quickstart keeps the
+  open-network TLS auto-enable) instead.
 
   Step 4 and the browser open are skipped when --no-launch is passed,
   which is useful in scripts and tests.
@@ -1099,6 +1149,17 @@ Notes:
 `);
 		process.exit(0);
 	}
+
+	// NO TLS for quickstart. The first-run dashboard must open at http://…
+	// with zero browser security warnings — a self-signed-cert prompt is a
+	// terrible first impression. Force TLS fully off for this command and the
+	// `clawback claude` child it spawns (which inherits this process.env),
+	// overriding even an existing CLAWBACK.md that sets `tls: true` or a
+	// non-loopback `host` that would auto-enable TLS. loadConfig reads
+	// CLAWBACK_DISABLE_TLS and (a) sets tls=false, (b) suppresses the
+	// open-network auto-enable — so every loadConfig below (and in the child)
+	// resolves http, and the proxy serves plain HTTP.
+	process.env.CLAWBACK_DISABLE_TLS = "1";
 
 	let qsResult;
 	try {
@@ -1206,7 +1267,7 @@ Notes:
 	}
 	if (qsConfig.host === "0.0.0.0" || qsConfig.host === "::") {
 		process.stdout.write(
-			`clawback quickstart: bound to ${qsConfig.host} (LAN-reachable); mutating endpoints gated by adminToken, GETs open.\n`,
+			`clawback quickstart: warning: your config binds ${qsConfig.host} (LAN-reachable) and quickstart forces TLS OFF, so the dashboard + captured credentials cross the LAN in CLEARTEXT. Mutating endpoints stay adminToken-gated; GETs are open. For encrypted LAN access, run \`clawback claude\` directly (keeps the TLS auto-enable) instead of quickstart.\n`,
 		);
 	}
 

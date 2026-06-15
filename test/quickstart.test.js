@@ -26,20 +26,21 @@ test("runQuickstart creates CLAWBACK.md with default-good overlay when absent", 
 	});
 	expect(result.init.action).toBe("created");
 	expect(result.init.targetPath).toBe(path.join(cwd, "CLAWBACK.md"));
-	expect(result.init.overlaidKeys.sort()).toEqual(
-		["host", "selfSign", "keepAliveModeExtended"].sort(),
-	);
+	// Loopback + plain HTTP by design: the overlay no longer forces
+	// host=0.0.0.0 / selfSign (those auto-enabled HTTPS with a self-signed
+	// cert — a security warning on the first screen). Only the cache knob.
+	expect(result.init.overlaidKeys.sort()).toEqual(["keepAliveModeExtended"]);
+	// initConfig still mints a token on a fresh create.
 	expect(result.init.adminTokenMinted).toBe(true);
 
 	const { data: parsed, body } = parseFrontMatter(
 		fs.readFileSync(result.init.targetPath, "utf8"),
 	);
 	expect(parsed.keepAliveModeExtended).toBe(true);
-	// LAN bind is safe because adminToken is auto-minted at the same time.
-	expect(parsed.host).toBe("0.0.0.0");
-	// 0.0.0.0 triggers open-network TLS auto-enable; selfSign lets the
-	// proxy mint a cert at startup instead of refusing to boot.
-	expect(parsed.selfSign).toBe(true);
+	// No host override → loadConfig defaults to the loopback bind, which
+	// does NOT auto-enable TLS. And no selfSign is written.
+	expect(parsed.host).toBeUndefined();
+	expect(parsed.selfSign).toBeUndefined();
 	// The init.js discovery doc-block (markdown body after the fence) is
 	// preserved verbatim through the overlay rewrite.
 	expect(body).toMatch(/turnLogFile/);
@@ -103,15 +104,16 @@ test("runQuickstart re-overlays default-good when config exists but key absent",
 
 	const result = runQuickstart({ cwd, env: { HOME: home } });
 	expect(result.init.action).toBe("defaults-overlaid");
-	// host already present, so only selfSign + keepAliveModeExtended land.
-	expect(result.init.overlaidKeys.sort()).toEqual(
-		["keepAliveModeExtended", "selfSign"].sort(),
-	);
+	// Only keepAliveModeExtended is overlaid now; the operator's host is left
+	// as-is and selfSign is no longer forced.
+	expect(result.init.overlaidKeys.sort()).toEqual(["keepAliveModeExtended"]);
 
 	const reread = parseFrontMatter(fs.readFileSync(cfgPath, "utf8")).data;
+	// Operator's own host choice is preserved untouched...
 	expect(reread.host).toBe("0.0.0.0");
 	expect(reread.keepAliveModeExtended).toBe(true);
-	expect(reread.selfSign).toBe(true);
+	// ...and quickstart did not inject selfSign.
+	expect(reread.selfSign).toBeUndefined();
 });
 
 test("runQuickstart with --force overwrites existing config", () => {
@@ -123,32 +125,33 @@ test("runQuickstart with --force overwrites existing config", () => {
 	expect(result.init.adminTokenMinted).toBe(true);
 
 	const reread = parseFrontMatter(fs.readFileSync(cfgPath, "utf8")).data;
-	// Force wipes back to the stub, then default-good is overlaid:
-	// the prior `host: "old"` is gone and the LAN-default takes its place.
-	expect(reread.host).toBe("0.0.0.0");
+	// Force wipes back to the stub, then default-good is overlaid: the prior
+	// `host: "old"` is gone and nothing replaces it, so the loopback DEFAULT
+	// governs the bind (no auto-TLS, no cert warning).
+	expect(reread.host).toBeUndefined();
 	expect(reread.keepAliveModeExtended).toBe(true);
 	// A fresh token is minted on overwrite.
 	expect(reread.adminToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
 });
 
-test("applyDefaultGoodOverlay mints an adminToken so host=0.0.0.0 can land on a tokenless config", () => {
-	// Pre-existing operator config with no adminToken. The overlay mints
-	// a token in-place so the LAN-bind safety gate is satisfied, then
-	// applies host=0.0.0.0. The operator's other keys (port=9999) are
-	// preserved.
+test("applyDefaultGoodOverlay overlays only keepAliveModeExtended and preserves operator keys", () => {
+	// Pre-existing operator config with no adminToken. The overlay adds
+	// keepAliveModeExtended and mints a token in-place (so a later widen to a
+	// non-loopback bind stays paired with a shared secret), but does NOT
+	// force host / selfSign — quickstart is loopback + plain HTTP. The
+	// operator's other keys (port=9999) are preserved.
 	const cfgPath = path.join(cwd, "CLAWBACK.md");
 	fs.writeFileSync(cfgPath, stringifyFrontMatter({ port: 9999 }));
 
 	const result = applyDefaultGoodOverlay(cfgPath);
-	expect(result.overlaidKeys.sort()).toEqual(
-		["host", "selfSign", "keepAliveModeExtended"].sort(),
-	);
+	expect(result.overlaidKeys.sort()).toEqual(["keepAliveModeExtended"]);
 	expect(result.adminTokenMinted).toBe(true);
 
 	const reread = parseFrontMatter(fs.readFileSync(cfgPath, "utf8")).data;
-	expect(reread.host).toBe("0.0.0.0");
+	// No host / selfSign injected → loopback default governs (no auto-TLS).
+	expect(reread.host).toBeUndefined();
+	expect(reread.selfSign).toBeUndefined();
 	expect(reread.keepAliveModeExtended).toBe(true);
-	expect(reread.selfSign).toBe(true);
 	expect(reread.port).toBe(9999);
 	expect(reread.adminToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
 });
@@ -174,12 +177,10 @@ test("applyDefaultGoodOverlay returns empty overlaidKeys when all defaults prese
 	expect(reread.host).toBe("127.0.0.1");
 });
 
-test("quickstart's generated config loads through the real security gate (default-secure)", () => {
-	// The overlay opens host=0.0.0.0, which loadConfig.validate refuses
-	// UNLESS an adminToken is set. This ties the quickstart output to the
-	// actual gate: if a future change ever opened the bind without minting
-	// a token, loadConfig would throw here instead of silently shipping an
-	// unauthenticated LAN-reachable proxy.
+test("quickstart's generated config loads as a loopback HTTP bind (no auto-TLS, no cert warning)", () => {
+	// quickstart is loopback + plain HTTP by design: the dashboard opens at
+	// http://127.0.0.1:… with no self-signed-cert browser warning. The
+	// generated config must therefore load WITHOUT auto-enabling TLS.
 	runQuickstart({ cwd, env: { HOME: home } });
 
 	const env = { HOME: home, XDG_CONFIG_HOME: "" };
@@ -188,12 +189,12 @@ test("quickstart's generated config loads through the real security gate (defaul
 		loaded = loadConfig({ cwd, env });
 	}).not.toThrow();
 	const { config } = loaded;
-	// LAN bind is paired with a high-entropy shared secret...
-	expect(config.host).toBe("0.0.0.0");
-	expect(config.adminToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-	// ...and the open-network bind auto-enabled TLS.
-	expect(config.tls).toBe(true);
-	// The core invariant, stated directly: never non-loopback AND tokenless.
+	// Loopback default → no open-network auto-enable → plain HTTP.
+	expect(config.host).toBe("127.0.0.1");
+	expect(config.tls).toBe(false);
+	expect(config._tlsAutoEnabled).toBeUndefined();
+	// The core invariant still holds: never non-loopback AND tokenless. Here
+	// it's satisfied by the loopback bind (admin auth is loopback-exempt).
 	const isLoopback =
 		config.host === "127.0.0.1" ||
 		config.host === "::1" ||

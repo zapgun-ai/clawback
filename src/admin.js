@@ -25,6 +25,11 @@ import {
 	parseRateLimit,
 	tokensResetIso,
 } from "./rate_limit.js";
+import {
+	assignLabelIndex,
+	composeIndexedLabel,
+	refreshLabelBranch,
+} from "./session_label.js";
 import { buildContext, evaluate } from "./suggestions.js";
 import { CLAWBACK_VERSION } from "./version.js";
 
@@ -150,6 +155,80 @@ export async function handleAdmin(
 			clawbackSession?.label ??
 			(requestedSessionId != null ? requestedSessionId : null);
 
+		// Per-render label self-heal (PLAN §39). The human-readable label lives
+		// in the spawned claude's env (CLAWBACK_SESSION_LABEL) and the statusline
+		// command re-sends it EVERY render, so the label survives a proxy restart
+		// or a session record recreated by API traffic — the launch-time POST is
+		// only a seed. Three headers drive it:
+		//   x-clawback-label    the launch base (`[host:]repo:branch`, no index)
+		//   x-clawback-autolabel "1" when the label is git-auto (vs operator)
+		//   x-clawback-branch   the CURRENT git branch (auto only), so the line
+		//                       tracks a mid-session `git checkout`
+		// Auto sessions get a server-assigned uniqueness index appended
+		// (`clawback:main:0`); operator `--label` sessions are adopted verbatim.
+		// A record already carrying an operator label is never overwritten.
+		let effectiveSessionLabel = sessionLabel;
+		const labelHeader = headerString(req.headers["x-clawback-label"]);
+		const branchHeader = headerString(req.headers["x-clawback-branch"]);
+		const isAutoLabel =
+			headerString(req.headers["x-clawback-autolabel"]) === "1";
+		if (clawbackSession != null && requestedSessionId != null) {
+			if (isAutoLabel && clawbackSession.labelSource !== "operator") {
+				// Prefer the stored base (it may carry a `host:` prefix the env
+				// header lacks); fall back to the header after a restart wiped it.
+				let base =
+					clawbackSession.labelBase ?? labelHeader ?? clawbackSession.label;
+				if (typeof base === "string" && branchHeader) {
+					base = refreshLabelBranch(base, branchHeader) ?? base;
+				}
+				if (typeof base === "string" && base.length > 0) {
+					const index =
+						clawbackSession.labelBase === base &&
+						Number.isInteger(clawbackSession.labelIndex)
+							? clawbackSession.labelIndex
+							: assignLabelIndex(store.all(), requestedSessionId, base);
+					const composed = composeIndexedLabel(base, index);
+					if (composed) {
+						effectiveSessionLabel = composed;
+						if (
+							composed !== clawbackSession.label ||
+							clawbackSession.labelBase !== base ||
+							clawbackSession.labelIndex !== index ||
+							clawbackSession.labelSource !== "auto"
+						) {
+							store.upsert(requestedSessionId, (prev) => ({
+								...(prev ?? clawbackSession),
+								label: composed,
+								labelBase: base,
+								labelIndex: index,
+								labelSource: "auto",
+							}));
+						}
+					}
+				}
+			} else if (
+				labelHeader &&
+				clawbackSession.labelSource !== "operator" &&
+				clawbackSession.label !== labelHeader
+			) {
+				// Operator `--label` session whose seed was lost: re-adopt verbatim.
+				let adopted = null;
+				try {
+					adopted = validateLabel(labelHeader);
+				} catch {
+					adopted = null;
+				}
+				if (adopted) {
+					effectiveSessionLabel = adopted;
+					store.upsert(requestedSessionId, (prev) => ({
+						...(prev ?? clawbackSession),
+						label: adopted,
+						labelSource: "operator",
+					}));
+				}
+			}
+		}
+
 		let claudeSession = null;
 		if (req.method === "POST") {
 			try {
@@ -181,7 +260,7 @@ export async function handleAdmin(
 			store,
 			claudeSession: effectiveSession,
 			clawbackSession,
-			sessionLabel,
+			sessionLabel: effectiveSessionLabel,
 			requestedSessionId,
 			// The statusline is rendered by Claude Code's ANSI-capable TUI,
 			// not by this server's stdout. The server runs headless (a
@@ -222,723 +301,7 @@ export async function handleAdmin(
 				appendSample({
 					source: "statusline",
 					sessionKey: requestedSessionId ?? undefined,
-					label: sessionLabel,
-					...sample,
-					mode: sampleModeSnapshot(config),
-				});
-			} catch (e) {
-				logger?.warn?.(`statusline metrics append failed: ${e.message}`);
-			}
-		}
-		if (res.headersSent) return;
-		res.writeHead(200, {
-			"content-type": "text/plain; charset=utf-8",
-			"cache-control": "no-cache",
-		});
-		res.end(text);
-		return;
-	}
-
-	if (parts[1] === "claude" && parts[2] === "input") {
-		if (req.method === "GET") {
-			return respond(200, {
-				active: hasActiveInput(),
-				label: activeInputLabel(),
-				remote: activeRemoteRegistration(),
-			});
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (!body || typeof body.text !== "string") {
-				return respond(400, {
-					error: "bad_request",
-					message: "body must be {text: string}",
-				});
-			}
-			const result = await writeInput(body.text);
-			if (result.written) return respond(200, result);
-			return respond(503, result);
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	// Reverse channel for cross-process attach. A `clawback claude` launcher
-	// that attached to this proxy POSTs here with its loopback callback
-	// URL + token; writeInput() then routes input back to that launcher's
-	// PTY. DELETE clears the registration (called on launcher exit).
-	if (parts[1] === "claude" && parts[2] === "register") {
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (!body || typeof body.url !== "string") {
-				return respond(400, {
-					error: "bad_request",
-					message: "body must be {url: string, token?: string, label?: string}",
-				});
-			}
-			try {
-				registerRemoteInput({
-					url: body.url,
-					token: typeof body.token === "string" ? body.token : null,
-					label: typeof body.label === "string" ? body.label : undefined,
-				});
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			logger?.info?.(
-				`claude PTY remote input registered (${body.url}, label=${body.label ?? "claude-remote"})`,
-			);
-			return respond(200, {
-				registered: true,
-				remote: activeRemoteRegistration(),
-			});
-		}
-		if (req.method === "DELETE") {
-			clearRemoteInput();
-			logger?.info?.("claude PTY remote input cleared");
-			return respond(200, { cleared: true });
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["POST", "DELETE"],
-		});
-	}
-
-	if (parts[1] === "passthrough") {
-		if (req.method === "GET") {
-			return respond(200, passthroughStatus(config));
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			const enabled = resolvePassthroughToggle(body, config);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyPassthrough(enabled, { config, scheduler, logger });
-			return respond(200, passthroughStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "keep-alive") {
-		if (req.method === "GET") {
-			return respond(200, {
-				keepAliveEnabled: Boolean(config.keepAliveEnabled),
-				passthrough: Boolean(config.passthrough),
-			});
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			// PLAN §33: while passthrough is on, this knob is force-pinned
-			// off (loadConfig's post-merge override). Re-enabling keep-alive
-			// mid-baseline would corrupt the experiment — refuse with 409
-			// rather than silently letting it through.
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before toggling keep-alive",
-				});
-			}
-			const enabled = resolveFlagToggle(body, config.keepAliveEnabled);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyKeepAlive(enabled, { config, scheduler, logger });
-			return respond(200, {
-				keepAliveEnabled: Boolean(config.keepAliveEnabled),
-				passthrough: Boolean(config.passthrough),
-			});
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "strip-ephemeral") {
-		if (req.method === "GET") {
-			return respond(200, {
-				stripEphemeralFromSystem: Boolean(config.stripEphemeralFromSystem),
-				passthrough: Boolean(config.passthrough),
-			});
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before toggling strip-ephemeral",
-				});
-			}
-			const enabled = resolveFlagToggle(body, config.stripEphemeralFromSystem);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyStripEphemeral(enabled, { config, logger });
-			return respond(200, {
-				stripEphemeralFromSystem: Boolean(config.stripEphemeralFromSystem),
-				passthrough: Boolean(config.passthrough),
-			});
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "extend-cache-ttl") {
-		if (req.method === "GET") {
-			return respond(200, extendCacheTtlStatus(config));
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before toggling extend-cache-ttl",
-				});
-			}
-			const enabled = resolveFlagToggle(body, config.injectExtendedCacheTtl);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyExtendCacheTtl(enabled, { config, logger });
-			return respond(200, extendCacheTtlStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "strip-extended-cache-ttl") {
-		if (req.method === "GET") {
-			return respond(200, stripExtendCacheTtlStatus(config));
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before toggling strip-extended-cache-ttl",
-				});
-			}
-			const enabled = resolveFlagToggle(body, config.stripExtendedCacheTtl);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyStripExtendCacheTtl(enabled, { config, logger });
-			return respond(200, stripExtendCacheTtlStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "mobile") {
-		if (req.method === "GET") {
-			return respond(200, mobileStatus(config));
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			const enabled = resolveFlagToggle(body, config.mobile);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyMobile(enabled, { config, logger });
-			return respond(200, mobileStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "keep-alive-extended") {
-		if (req.method === "GET") {
-			return respond(200, keepAliveExtendedStatus(config));
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before toggling keep-alive-extended",
-				});
-			}
-			const enabled = resolveFlagToggle(body, config.keepAliveModeExtended);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyKeepAliveExtended(enabled, { config, logger });
-			return respond(200, keepAliveExtendedStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "auto-continue") {
-		if (req.method === "GET") {
-			return respond(200, autoContinueStatus(config));
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			// While passthrough is on, this knob is force-pinned off so
-			// the baseline arm is honest. A mid-window flip would itself
-			// be a toggle event in the measurement; refuse with 409 and
-			// let the operator exit passthrough first. Mirrors the
-			// guard on keep-alive / strip-ephemeral / extend-cache-ttl.
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before toggling auto-continue",
-				});
-			}
-			const enabled = resolveFlagToggle(body, config.autoContinue);
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'toggle'|'on'|'off'}",
-				});
-			}
-			applyAutoContinue(enabled, { config, logger });
-			return respond(200, autoContinueStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "stack") {
-		// Composite apply target for the suggestion engine's long-session
-		// stack rules (stack-cold-suggest-all, stack-partial-completion).
-		// Flips keep-alive + 1h TTL + extended cadence together so one
-		// click takes the operator from cold to the full §3.4/§5.1/§5.2
-		// stack. Not exposed as a UI toggle — there's no 8th knob — but
-		// the apply endpoint exists so the suggestion cards' button works.
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before applying the stack",
-				});
-			}
-			const action =
-				typeof body?.action === "string" ? body.action.toLowerCase() : null;
-			const enabled =
-				typeof body?.enabled === "boolean"
-					? body.enabled
-					: action === "on" || action === "enable"
-						? true
-						: action === "off" || action === "disable"
-							? false
-							: null;
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'on'|'off'|'enable'|'disable'}",
-				});
-			}
-			applyKeepAlive(enabled, { config, scheduler, logger });
-			applyExtendCacheTtl(enabled, { config, logger });
-			applyKeepAliveExtended(enabled, { config, logger });
-			return respond(200, {
-				keepAliveEnabled: Boolean(config.keepAliveEnabled),
-				injectExtendedCacheTtl: Boolean(config.injectExtendedCacheTtl),
-				keepAliveModeExtended: Boolean(config.keepAliveModeExtended),
-			});
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["POST"],
-		});
-	}
-
-	if (parts[1] === "tight-loop") {
-		// Composite apply target for the strip-1h-tight-loop suggestion.
-		// "on" forces the documented 5m TTL (strips the native 1h headers
-		// Claude Code writes) AND drops keep-alive back to the fast 1-4 min
-		// cadence that matches a 5m cache — the two halves of the tight-loop
-		// fix. Unlike `stack` it applies fixed polarities, not one uniform
-		// boolean: strip ON but extended-cadence OFF. "off" only lifts the
-		// strip; it leaves the cadence where the operator left it (symmetric
-		// with strip-extended-cache-ttl, which doesn't presume to restore 1h
-		// inject on disable). Not a UI knob — the apply endpoint exists so
-		// the suggestion card's one-click button works.
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			if (config.passthrough) {
-				return respond(409, {
-					error: "conflict",
-					message:
-						"passthrough is enabled; exit passthrough before applying the tight-loop fix",
-				});
-			}
-			const action =
-				typeof body?.action === "string" ? body.action.toLowerCase() : null;
-			const enabled =
-				typeof body?.enabled === "boolean"
-					? body.enabled
-					: action === "on" || action === "enable"
-						? true
-						: action === "off" || action === "disable"
-							? false
-							: null;
-			if (typeof enabled !== "boolean") {
-				return respond(400, {
-					error: "bad_request",
-					message:
-						"body must be {enabled: bool} or {action: 'on'|'off'|'enable'|'disable'}",
-				});
-			}
-			applyStripExtendCacheTtl(enabled, { config, logger });
-			if (enabled) applyKeepAliveExtended(false, { config, logger });
-			return respond(200, {
-				stripExtendedCacheTtl: Boolean(config.stripExtendedCacheTtl),
-				injectExtendedCacheTtl: Boolean(config.injectExtendedCacheTtl),
-				keepAliveModeExtended: Boolean(config.keepAliveModeExtended),
-			});
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["POST"],
-		});
-	}
-
-	if (parts[1] === "capture-baseline") {
-		if (req.method === "GET") {
-			return respond(200, captureBaselineStatus(config));
-		}
-		if (req.method === "POST") {
-			let body = {};
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			// Optional per-capture overrides. `shadow` opts into the ~2x-cost
-			// turn-matched capture that keeps the armed knobs live; `turns`
-			// overrides the window length for this run only.
-			const shadow =
-				typeof body?.shadow === "boolean" ? body.shadow : undefined;
-			const turns =
-				Number.isFinite(body?.turns) && body.turns > 0
-					? Math.floor(body.turns)
-					: undefined;
-			startBaselineCapture(config, {
-				store,
-				scheduler,
-				logger,
-				shadow,
-				turns,
-			});
-			return respond(200, captureBaselineStatus(config));
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "suggestions" && req.method === "GET") {
-		const context = buildContext({
-			config,
-			store,
-			samples: listSamples({ limit: MAX_SAMPLES_PER_SESSION }),
-			turnLogFile: config?.turnLogFile ?? null,
-		});
-		const suggestions = evaluate(context);
-		return respond(200, { suggestions });
-	}
-
-	if (parts[1] === "metrics") {
-		if (req.method === "GET") {
-			const sinceParam = url.searchParams.get("since");
-			const limitParam = url.searchParams.get("limit");
-			// PLAN §39 (Phase 1): optional ?session=<id> filter restricts
-			// the returned samples to a single session's ring. Omitted
-			// query → merged samples across all rings (chronological).
-			const sessionParam = url.searchParams.get("session");
-			const limit =
-				limitParam != null && Number.isFinite(Number(limitParam))
-					? Math.max(0, Math.floor(Number(limitParam)))
-					: MAX_SAMPLES_PER_SESSION;
-			const samples = listSamples({
-				session: sessionParam || null,
-				since: sinceParam || null,
-				limit,
-			});
-			return respond(200, {
-				samples,
-				capacity: MAX_SAMPLES_PER_SESSION,
-				returned: samples.length,
-				session: sessionParam || null,
-			});
-		}
-		if (req.method === "POST") {
-			let body;
-			try {
-				body = await readJsonBody(req);
-			} catch (e) {
-				return respond(400, { error: "bad_request", message: e.message });
-			}
-			const action =
-				typeof body?.action === "string" ? body.action.toLowerCase() : null;
-			if (action !== "clear") {
-				return respond(400, {
-					error: "bad_request",
-					message: "body must be {action: 'clear'}",
-				});
-			}
-			// PLAN §39 (Phase 1): optional {session: "<id>"} in the body
-			// clears just that ring; omitted clears every ring (legacy
-			// behaviour, the UI's "clear history" button).
-			const sessionArg =
-				typeof body?.session === "string" && body.session.length > 0
-					? body.session
-					: null;
-			const cleared = clearSamples({ session: sessionArg });
-			appendEvent({
-				type: "metrics-cleared",
-				text: sessionArg
-					? `metrics ring cleared for session=${sessionArg} (${cleared} samples)`
-					: `metrics ring cleared (${cleared} samples)`,
-			});
-			return respond(200, {
-				cleared: true,
-				count: cleared,
-				session: sessionArg,
-			});
-		}
-		return respond(405, {
-			error: "method_not_allowed",
-			allow: ["GET", "POST"],
-		});
-	}
-
-	if (parts[1] === "ui" && uiServer) {
-		const subPath = parts.slice(2).join("/");
-		return uiServer.handle(req, res, subPath);
-	}
-
-	if (parts[1] === "report" && reportServer) {
-		logger?.debug?.(`admin ${req.method} ${url.pathname} → report`);
-		return reportServer.handle(req, res, parts.slice(2), { config });
-	}
-
-	if (parts[1] === "events" && req.method === "GET") {
-		const limit = Number.parseInt(url.searchParams.get("limit") ?? "200", 10);
-		return respond(200, {
-			events: listEvents({ limit: Number.isNaN(limit) ? 200 : limit }),
-		});
-	}
-
-	if (parts[1] === "statusline") {
-		// PLAN §29: plain-text endpoint for Claude Code's statusLine command.
-		// GET returns clawback state only (simple `curl` integration). POST
-		// accepts the JSON session data Claude Code passes on stdin and
-		// merges claude-reported fields (model, context %, cost) into the line.
-		//
-		// PLAN §39 (Phase 1): per-session routing. The optional path suffix
-		// /_proxy/statusline/<id> identifies which clawback session this
-		// render is for; the rendered text uses that session's hit/tps/ttft
-		// and the per-session metrics ring receives the sample. The legacy
-		// /_proxy/statusline (no id, or id == "_default") falls back to the
-		// mostRecentSession-style aggregate render.
-		if (req.method !== "GET" && req.method !== "POST") {
-			return respond(405, {
-				error: "method_not_allowed",
-				allow: ["GET", "POST"],
-			});
-		}
-		const requestedSessionId =
-			parts[2] && parts[2] !== "_default" ? parts[2] : null;
-		const clawbackSession =
-			requestedSessionId != null ? store.get(requestedSessionId) : null;
-		const sessionLabel =
-			clawbackSession?.label ??
-			(requestedSessionId != null ? requestedSessionId : null);
-
-		let claudeSession = null;
-		if (req.method === "POST") {
-			try {
-				const body = await readJsonBody(req, 64 * 1024);
-				claudeSession = body && typeof body === "object" ? body : null;
-			} catch {
-				// Malformed body: don't break the operator's statusline. Fall
-				// through to clawback-only render.
-				claudeSession = null;
-			}
-		}
-		// Plan-quota windows (five_hour/seven_day) are account-global, not
-		// per-session (PLAN §12.2): record this POST's quota into the shared
-		// store, then render EVERY session from that freshest value so an idle
-		// session no longer shows a stale, too-low quota. `accountGlobalQuota`
-		// off restores strict per-session rendering (the multi-account escape
-		// hatch — see §23). Recording is POST-only (a GET carries no payload);
-		// the overlay is a no-op until something has been recorded, so the
-		// pure-render tests that bypass this handler are unaffected.
-		const accountGlobal = config.accountGlobalQuota !== false;
-		if (accountGlobal && req.method === "POST") {
-			recordQuotaObservation(claudeSession?.rate_limits);
-		}
-		const effectiveSession = accountGlobal
-			? overlayAccountQuota(claudeSession)
-			: claudeSession;
-		const text = renderStatusline({
-			config,
-			store,
-			claudeSession: effectiveSession,
-			clawbackSession,
-			sessionLabel,
-			requestedSessionId,
-			// The statusline is rendered by Claude Code's ANSI-capable TUI,
-			// not by this server's stdout. The server runs headless (a
-			// background daemon), so resolving color off its own
-			// process.stdout.isTTY would wrongly strip color from a sink
-			// that supports it (operator-flagged 2026-05-28). Resolve as
-			// isatty:true; explicit statuslineColor "off" and NO_COLOR
-			// (operator kill-switch) still win inside resolveStatuslineColor.
-			colorEnabled: resolveStatuslineColor({ config, isatty: true }),
-		});
-		// PLAN §33: also feed the metrics ring so the web UI can plot
-		// the values that just got rendered. Only do this on POST —
-		// plain GETs have no claude attached and the chart would just
-		// see noise from whatever clawback session happens to be
-		// freshest.
-		if (req.method === "POST") {
-			try {
-				// Mirror renderStatusline's scoping: a scoped request whose
-				// session isn't in the store yet must not borrow a sibling's
-				// tps/ttft into the chart sample (it's keyed by this session's
-				// id below). Only the legacy no-id path uses mostRecentSession.
-				const recentSession =
-					clawbackSession ??
-					(requestedSessionId != null ? null : mostRecentSession(store));
-				const claudeAttached =
-					effectiveSession != null &&
-					typeof effectiveSession === "object" &&
-					!Array.isArray(effectiveSession);
-				const claudeIsFresh =
-					claudeAttached &&
-					effectiveSession.context_window?.current_usage == null;
-				const sample = extractMetricsSample({
-					claudeSession: effectiveSession,
-					recentSession,
-					claudeIsFresh,
-					claudeAttached,
-				});
-				appendSample({
-					source: "statusline",
-					sessionKey: requestedSessionId ?? undefined,
-					label: sessionLabel,
+					label: effectiveSessionLabel,
 					...sample,
 					mode: sampleModeSnapshot(config),
 				});
@@ -1641,13 +1004,36 @@ export async function handleAdmin(
 					message: e.message,
 				});
 			}
+			// `source: "auto"` marks a git-derived seed: the proxy appends a
+			// per-base uniqueness index and records labelBase/labelIndex so the
+			// per-render self-heal can keep it stable and branch-track it. Any
+			// other source (default "operator") is an explicit `--label` and is
+			// stored verbatim, never indexed.
+			const labelSource = body.source === "auto" ? "auto" : "operator";
 			store.upsert(sessionId, (prev) => {
-				const base = prev ?? {
+				const stub = prev ?? {
 					key: sessionId,
 					mode: "path",
 					createdAt: new Date().toISOString(),
 				};
-				return { ...base, label, labelSource: "operator" };
+				if (labelSource === "auto") {
+					const labelBase = label;
+					const labelIndex =
+						prev?.labelSource === "auto" &&
+						prev?.labelBase === labelBase &&
+						Number.isInteger(prev?.labelIndex)
+							? prev.labelIndex
+							: assignLabelIndex(store.all(), sessionId, labelBase);
+					const composed = composeIndexedLabel(labelBase, labelIndex) ?? label;
+					return {
+						...stub,
+						label: composed,
+						labelBase,
+						labelIndex,
+						labelSource: "auto",
+					};
+				}
+				return { ...stub, label, labelSource: "operator" };
 			});
 			return respond(200, publicSession(store.get(sessionId)));
 		}
@@ -1684,6 +1070,8 @@ export function publicSession(s) {
 		// special-case missing values.
 		label: s.label ?? s.key,
 		labelSource: s.labelSource ?? "auto",
+		labelBase: s.labelBase ?? null,
+		labelIndex: Number.isInteger(s.labelIndex) ? s.labelIndex : null,
 		mode: s.mode,
 		model: s.model ?? null,
 		ttlMode: s.ttlMode ?? null,
@@ -1756,7 +1144,7 @@ function byteSize(v) {
  *
  *   <prefix>context ████░░░░ XX% · day ████░░░░ XX% · week ████░░░░ XX%
  *     · cache ████░░░░ XX% · turn ████░░░░ XX%
- *     · tps ▁▃▆█▂▅▇▄ N · ttft ▆▅▃▂▁▂▁▁ M
+ *     · tps ▁▃▆█▂▅▇▄ N · clawback
  *
  * Capped at `statuslineMaxChars` with a trailing "…" if truncated.
  *
@@ -1791,9 +1179,11 @@ function byteSize(v) {
  *   `context_window.current_usage` (last API call's breakdown).
  * - `tps`: output tokens/second of the most-recent turn. Sparkline
  *   shows the previous SPARK_LEN turns from `session.recentTps`.
- * - `ttft`: time-to-first-token of the most-recent turn (ms). Sparkline
- *   shows the previous SPARK_LEN turns from `session.recentTtftMs`.
- *   Lower is better — a falling trend means the cache is warming.
+ * - `clawback`: a static brand mark occupying the slot the `ttft`
+ *   (time-to-first-token) field used to render. TTFT is still CAPTURED —
+ *   `session.recentTtftMs` keeps filling in server.js and the dashboard
+ *   charts still read it — it's just no longer surfaced on the statusline
+ *   (operator-requested: replace the ttft sparkline/metric with "clawback").
  *
  * Cost (`cost.total_cost_usd`) is intentionally not surfaced —
  * clawback's pricing table is unreliable; `benchmark/` is the right
@@ -1877,17 +1267,16 @@ export function renderStatusline({
 		claudeIsFresh || (sessionScoped && clawbackSession == null);
 
 	// Pull the threshold knobs from config once and bundle them so each
-	// formatter gets one options-bag entry instead of three. The `tps` and
-	// `ttft` pairs are the *effective* ones — resolveTpsThresholds /
-	// resolveTtftThresholds derive them from the session ring when that
-	// metric's calibration is "relative", or pass the static config pair
-	// through when "absolute" (or when the ring is too short to calibrate).
+	// formatter gets one options-bag entry instead of two. The `tps` pair is
+	// the *effective* one — resolveTpsThresholds derives it from the session
+	// ring when tps calibration is "relative", or passes the static config
+	// pair through when "absolute" (or when the ring is too short to
+	// calibrate).
 	const thresholds = {
 		pct: {
 			low: config.statuslinePctThresholdLow,
 			high: config.statuslinePctThresholdHigh,
 		},
-		ttft: resolveTtftThresholds(recentSession, config),
 		tps: resolveTpsThresholds(recentSession, config),
 	};
 
@@ -1900,7 +1289,7 @@ export function renderStatusline({
 	// sometimes chopped fields mid-glyph).
 	//
 	// Drop order (lowest priority leaves first):
-	//   week (10) → quota (20) → ttft (30) → tps (40) → turn (60) →
+	//   week (10) → quota (20) → brand (30) → tps (40) → turn (60) →
 	//   cache (70) → context (99 — never).
 	//
 	// Field order (render left-to-right) is independent of drop order:
@@ -1962,14 +1351,16 @@ export function renderStatusline({
 				}),
 		},
 		{
-			key: "ttft",
+			// Brand mark in the slot the ttft field used to occupy. TTFT is
+			// still captured (server.js recentTtftMs ring + dashboard charts);
+			// it's just no longer shown here. ALWAYS rendered (operator wants
+			// the brand on every statusline — including a fresh/idle proxy with
+			// nothing connected yet), so the line is never truly empty. Keeps
+			// ttft's old drop priority, so on a too-narrow width it can still be
+			// dropped before context; at the default max it always survives.
+			key: "brand",
 			priority: 30,
-			build: (color) =>
-				formatTtftField(recentSession, {
-					claudeIsFresh: metricsWaiting,
-					color,
-					thresholds,
-				}),
+			build: () => "clawback",
 		},
 	];
 
@@ -2049,20 +1440,8 @@ function colorByPctLow(pct, { low, high } = { low: 50, high: 80 }) {
 	return ANSI_GREEN;
 }
 
-// TTFT (ms), lower = better. Below `low` is green (warm cache), [low,
-// high) is yellow, ≥high is red (cold cache or upstream slow). Used
-// per-cell on the ttft sparkline so a warming pattern visibly transitions
-// red → yellow → green left-to-right.
-function colorByTtft(ms, { low, high } = { low: 500, high: 2000 }) {
-	if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
-	if (ms < low) return ANSI_GREEN;
-	if (ms < high) return ANSI_YELLOW;
-	return ANSI_RED;
-}
-
-// TPS, higher = better. Mirrors colorByTtft's mechanism but inverts the
-// direction (operator-confirmed 2026-05-07). Below `low` is red (slow,
-// bad), [low, high) is yellow, ≥high is green (fast, good). The
+// TPS, higher = better. Below `low` is red (slow, bad), [low, high) is
+// yellow, ≥high is green (fast, good) (operator-confirmed 2026-05-07). The
 // {low, high} pair is the *effective* one resolved by
 // resolveTpsThresholds — either static config values ("absolute") or
 // derived from the session ring ("relative", default).
@@ -2111,45 +1490,6 @@ function resolveTpsThresholds(session, config) {
 	return { low: peak / 6, high: peak / 2 };
 }
 
-// Minimum finite-and-positive ring samples before "relative" TTFT
-// calibration kicks in. Lower than the TPS gate: the recentTtftMs ring
-// is shorter (TTFT_RING_LEN=8) and every turn feeds it (no min-token
-// filter), so 3 turns is enough signal to leave the bootstrap window
-// quickly — which is the whole point, since the absolute fallback is the
-// wide band we're trying to escape.
-const TTFT_RELATIVE_MIN_SAMPLES = 3;
-
-function medianOf(values) {
-	const s = [...values].sort((a, b) => a - b);
-	const mid = Math.floor(s.length / 2);
-	return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-
-// TTFT analog of resolveTpsThresholds (lower = better). Returns the
-// static config pair when calibration is "absolute" or the ring is too
-// short. Otherwise derives low = median*1.5, high = median*3 from the
-// session's recentTtftMs ring: a turn within 1.5x the session's typical
-// first-token latency is green, 1.5-3x is yellow, >3x is red. Anchored on
-// the MEDIAN (not the min, the mirror of tps's peak) so one ultra-fast
-// cached request can't drag the green cutoff below the session's
-// realistic floor and paint every normal turn yellow.
-function resolveTtftThresholds(session, config) {
-	const absolute = {
-		low: config.statuslineTtftThresholdLowMs,
-		high: config.statuslineTtftThresholdHighMs,
-	};
-	if (config.statuslineTtftCalibration !== "relative") return absolute;
-	if (!session || typeof session !== "object" || Array.isArray(session)) {
-		return absolute;
-	}
-	const ring = Array.isArray(session.recentTtftMs) ? session.recentTtftMs : [];
-	const finite = ring.filter((v) => Number.isFinite(v) && v > 0);
-	if (finite.length < TTFT_RELATIVE_MIN_SAMPLES) return absolute;
-	const med = medianOf(finite);
-	if (!Number.isFinite(med) || med <= 0) return absolute;
-	return { low: med * 1.5, high: med * 3 };
-}
-
 /**
  * Resolve the runtime color setting to a boolean.
  *
@@ -2186,11 +1526,6 @@ export function resolveStatuslineColor({
 // cache turns occasionally exceed it and will jitter that one column.
 const PCT_WIDTH = 4; // "  0%" to "100%" or " na%"
 const TPS_WIDTH = 3; // "  0" to "999" or " na"
-// 5 chars covers up to 99999 ms (99 s). Production cold-cache TTFTs
-// occasionally exceed 9999 ms (10 s+) on first-turn cache misses, so the
-// extra column saves a one-time reflow when that lands. Operator-confirmed
-// 2026-05-07.
-const TTFT_WIDTH = 5; // "    0" to "99999" or "   na"
 
 function formatPctValue(pct) {
 	if (pct == null || !Number.isFinite(pct)) return "na%".padStart(PCT_WIDTH);
@@ -2200,12 +1535,6 @@ function formatPctValue(pct) {
 function formatTpsValue(value) {
 	if (value == null || !Number.isFinite(value)) return "na".padStart(TPS_WIDTH);
 	return String(Math.max(0, Math.round(value))).padStart(TPS_WIDTH);
-}
-
-function formatTtftValue(value) {
-	if (value == null || !Number.isFinite(value))
-		return "na".padStart(TTFT_WIDTH);
-	return String(Math.max(0, Math.round(value))).padStart(TTFT_WIDTH);
 }
 
 function formatCtxField(
@@ -2552,46 +1881,6 @@ function formatTpsField(
 	// via statuslineTpsThresholdLow/High.
 	const colorFor = color ? (v) => colorByTps(v, thresholds?.tps) : null;
 	return `tps ${sparklineFromValues(window, SPARK_LEN, { colorFor })} ${formatTpsValue(latest)}`;
-}
-
-/**
- * Time-to-first-token for the most-recent turn (ms), with a sparkline
- * of the previous SPARK_LEN turns. Driven by `session.recentTtftMs`
- * ring buffer populated in server.js (the `ttftMs` returned from
- * `proxyRequest`). The cleanest cache-warmth signal we have: warm
- * cache shows ~100-500ms, cold ~1000-3000ms. Lower is better, which
- * means a *falling* sparkline trend is good — opposite of the tps
- * field.
- *
- * When there's no history yet (fresh boot, or session captured before
- * we started recording the ring), we render a waiting placeholder
- * `▒▒▒▒▒▒▒▒ na` — same shading as the day/week placeholders so the
- * "no data yet" state is visually uniform across the line. Reserves
- * the column so the sparkline doesn't snap in on the second turn
- * (operator-flagged 2026-05-06).
- */
-function formatTtftField(
-	session,
-	{ claudeIsFresh = false, color = false, thresholds = null } = {},
-) {
-	// Same gate as tps: when claude is provably pre-first-call, the
-	// ring contents belong to some other claude. Show " na" rather than
-	// a stranger's last-turn ttft.
-	if (claudeIsFresh) {
-		return `ttft ${"▒".repeat(SPARK_LEN)} ${formatTtftValue(null)}`;
-	}
-	if (!session) return null;
-	const ring = Array.isArray(session.recentTtftMs) ? session.recentTtftMs : [];
-	const latest = ring.length > 0 ? ring[ring.length - 1] : null;
-	if (!Number.isFinite(latest)) {
-		return `ttft ${"▒".repeat(SPARK_LEN)} ${formatTtftValue(null)}`;
-	}
-	const window = ring.slice(-SPARK_LEN);
-	// Color each cell by its absolute ms value, not the relative
-	// position in the window. A warming pattern (red ms → green ms)
-	// reads as a clear color gradient.
-	const colorFor = color ? (v) => colorByTtft(v, thresholds?.ttft) : null;
-	return `ttft ${sparklineFromValues(window, SPARK_LEN, { colorFor })} ${formatTtftValue(latest)}`;
 }
 
 /**
@@ -3316,6 +2605,14 @@ function applyPassthrough(enabled, { config, scheduler, logger }) {
 			autoContinue: config.autoContinue,
 		},
 	});
+}
+
+// Node lowercases header names but a repeated header arrives as an array.
+// Collapse to the first string value (or null) so callers can compare directly.
+function headerString(v) {
+	if (typeof v === "string") return v;
+	if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+	return null;
 }
 
 async function readJsonBody(req, maxBytes = 16 * 1024) {

@@ -368,10 +368,27 @@ export function loadConfig({
 	// wide binds get safer defaults, not hard mandates. `_tlsAutoEnabled`
 	// lets start() explain *why* TLS came on (and shapes the missing-cert
 	// error in provisionTlsCert).
+	//
+	// `CLAWBACK_DISABLE_TLS=1` is the escape hatch that wins over everything:
+	// it forces `tls` off AND suppresses the auto-enable, even when a config
+	// layer or the CLI set `tls: true`. `clawback quickstart` sets it so the
+	// first-run dashboard always opens at http:// with no self-signed-cert
+	// browser warning — including when the operator's existing CLAWBACK.md
+	// binds a non-loopback host (which would otherwise auto-enable TLS). The
+	// tradeoff on a wide bind is cleartext credentials on the wire; the
+	// quickstart CLI surfaces that. Counts as an explicit `tls` choice.
+	const envDisableTls = resolvedEnv?.CLAWBACK_DISABLE_TLS === "1";
 	const tlsExplicit =
+		envDisableTls ||
 		Object.hasOwn(cliOverrides, "tls") ||
 		layers.some((l) => l && typeof l === "object" && Object.hasOwn(l, "tls"));
-	if (!tlsExplicit && merged.tls !== true && !isLoopbackBind(merged.host)) {
+	if (envDisableTls) {
+		merged.tls = false;
+	} else if (
+		!tlsExplicit &&
+		merged.tls !== true &&
+		!isLoopbackBind(merged.host)
+	) {
 		merged.tls = true;
 		merged._tlsAutoEnabled = true;
 	}

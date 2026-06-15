@@ -299,6 +299,33 @@ test("launchClaude with clawbackId but no label omits CLAWBACK_SESSION_LABEL", a
 	expect(captured.opts.env.CLAWBACK_SESSION_LABEL).toBeUndefined();
 });
 
+test("launchClaude sets CLAWBACK_AUTOLABEL=1 only for a git-auto label", async () => {
+	// autoLabel true → the statusline command refreshes the branch per render.
+	const a = {};
+	await launchClaude({
+		args: [],
+		cwd,
+		env: { HOME: cwd, PATH: "/usr/bin" },
+		spawnFn: fakeSpawn(a),
+		clawbackId: "a3f9b2c1",
+		label: "clawback:main",
+		autoLabel: true,
+	});
+	expect(a.opts.env.CLAWBACK_AUTOLABEL).toBe("1");
+
+	// Operator --label (autoLabel default false) → no refresh signal.
+	const b = {};
+	await launchClaude({
+		args: [],
+		cwd,
+		env: { HOME: cwd, PATH: "/usr/bin" },
+		spawnFn: fakeSpawn(b),
+		clawbackId: "a3f9b2c1",
+		label: "my-work",
+	});
+	expect(b.opts.env.CLAWBACK_AUTOLABEL).toBeUndefined();
+});
+
 // `--remote URL`: launchClaude's remoteUrl override replaces the
 // config-derived host:port for ANTHROPIC_BASE_URL and CLAWBACK_PROXY_URL,
 // so the spawned claude (and its statusline curl) target the remote

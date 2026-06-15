@@ -21,9 +21,11 @@ export function mintClawbackId() {
 // (see composeSessionLabel + bin/clawback.js). Colon added to the
 // allowed subsequent-char set as the host/label separator; it's not
 // permitted as the first character so a bare `:foo` can't masquerade
-// as a host-prefixed label.
-const LABEL_MAX_LEN = 64;
-const LABEL_PATTERN = /^[A-Za-z0-9._-][A-Za-z0-9._\- :]{0,63}$/;
+// as a host-prefixed label. At-sign (`@`) is allowed (subsequent only)
+// for the auto `<repo>:@<short-sha>` detached-HEAD label minted by
+// computeDefaultSessionLabel (see src/session_label.js).
+export const LABEL_MAX_LEN = 64;
+const LABEL_PATTERN = /^[A-Za-z0-9._-][A-Za-z0-9._\- :@]{0,63}$/;
 const RESERVED_LABELS = new Set(["_default", "_aggregate"]);
 
 /**
@@ -55,7 +57,7 @@ export function validateLabel(raw) {
 	}
 	if (!LABEL_PATTERN.test(trimmed)) {
 		throw new Error(
-			"label may contain letters, digits, dot, underscore, hyphen, colon, and (after the first character) space",
+			"label may contain letters, digits, dot, underscore, hyphen, colon, at-sign, and (after the first character) space",
 		);
 	}
 	if (RESERVED_LABELS.has(trimmed)) {

@@ -233,7 +233,10 @@ test("--remote skips probe, skips local proxy, points claude at the remote URL",
 		const expectedLabel = host
 			? composeSessionLabel(host, "from-remote")
 			: "from-remote";
-		expect(JSON.parse(labelPosts[0].body)).toEqual({ label: expectedLabel });
+		expect(JSON.parse(labelPosts[0].body)).toEqual({
+			label: expectedLabel,
+			source: "operator",
+		});
 	} finally {
 		server.close();
 	}
@@ -305,7 +308,10 @@ test("local attach records the bare --label, NOT host-prefixed", async () => {
 		// The recorded label is the bare operator value — no host prefix.
 		expect(labelPosts.length).toBe(1);
 		expect(labelPosts[0].url).toMatch(/^\/_proxy\/sessions\/[0-9a-f]{8}$/);
-		expect(JSON.parse(labelPosts[0].body)).toEqual({ label: "local-work" });
+		expect(JSON.parse(labelPosts[0].body)).toEqual({
+			label: "local-work",
+			source: "operator",
+		});
 	} finally {
 		server.close();
 	}

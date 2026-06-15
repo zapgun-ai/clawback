@@ -181,6 +181,41 @@ test("`quick` is an alias for `quickstart` (no fall-through to parseArgs)", asyn
 	expect(code).toBe(0);
 });
 
+test("`quickstart` forces http even when the existing config sets tls:true", async () => {
+	// The whole point: a first-run dashboard must never open over HTTPS with
+	// a self-signed cert (an immediate browser security warning). Even when
+	// the operator's CLAWBACK.md explicitly opts into TLS on a non-loopback
+	// bind, quickstart force-disables TLS and prints an http:// URL.
+	const port = 18000 + Math.floor(Math.random() * 5000);
+	fs.writeFileSync(
+		path.join(cwd, "CLAWBACK.md"),
+		stringifyFrontMatter({
+			host: "0.0.0.0",
+			tls: true,
+			adminToken: "a".repeat(43),
+			port,
+		}),
+	);
+
+	const { code, stdout } = await runBin(["quickstart", "--no-launch"], {
+		cwd,
+		env: {
+			HOME: homeDir,
+			PATH: `${fakeBinDir}:${process.env.PATH}`,
+			CLAWBACK_NO_OPEN_BROWSER: "1",
+		},
+	});
+
+	expect(code).toBe(0);
+	// The auto-open URL is http, never https.
+	expect(stdout).toMatch(
+		new RegExp(`dashboard will auto-open at http://127\\.0\\.0\\.1:${port}/`),
+	);
+	expect(stdout).not.toMatch(/https:\/\//);
+	// And because the bind is non-loopback, the cleartext warning fires.
+	expect(stdout).toMatch(/forces TLS OFF/);
+});
+
 test("`up` is an alias for `quickstart` (no fall-through to parseArgs)", async () => {
 	// Same argv[2] rewrite as the `quick` alias above; guards the same two
 	// regressions ("unknown subcommand 'up'" or ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL

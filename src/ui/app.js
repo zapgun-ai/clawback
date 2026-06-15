@@ -1509,7 +1509,19 @@ function renderSessionsTable() {
 		// Long labels overflow into other table cells; the CSS clips
 		// with ellipsis at 28ch. Full label is still discoverable via
 		// the cell's title attribute below.
-		labelWrap.appendChild(document.createTextNode(row.label));
+		const labelText = document.createElement("span");
+		labelText.className = "session-label-name";
+		labelText.textContent = row.label;
+		labelWrap.appendChild(labelText);
+		// Show the unique session key (short code) beside the friendly label
+		// (e.g. "clawback:main"). Skipped when no label was registered — then
+		// row.label IS the key, so a chip would just duplicate it.
+		if (row.label !== row.key) {
+			const code = document.createElement("span");
+			code.className = "session-code";
+			code.textContent = row.key;
+			labelWrap.appendChild(code);
+		}
 		const sessionMeta = state.sessions.find((s) => s.key === row.key);
 		const evictPreview = formatEvictCell(sessionMeta);
 		if (evictPreview.state === "evicted") {
